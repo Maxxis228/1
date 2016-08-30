@@ -600,4 +600,85 @@ DROP TABLE MPSP_POS;
 DROP TABLE MPSP_STAGE;
 DROP TABLE MPSP_APPL_TRANSACTION;
 
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+
+CREATE TABLE  MPSP_APPL AS (
+SELECT 
+	A.SOURCE_SYSTEM_CD||A.APP_PRT_ID AS ID_APPL, --ID заявки + ID подразделения
+	A.OPEN_DT AS APPLICATION_DT, --дата заведения заявки
+	A.SOURCE_SYSTEM_CD AS BRANCH_ID, --ID подразделения
+	A.APP_PRT_ID AS APPLICATION_ID, --ID заявки
+	A.AGREEMENT_RK AS APPLICATION_RK,  --RK заявки                
+	A.CUSTOMER_RK, --RK клиента
+	A.CUSTOMER_TYPE_CD,              
+	A.INTERNAL_ORG_ID, --код подразделения-инициатора
+	A.INTERNAL_ORG_RK, --код подразделения-инициатора
+	A.PRODUCT_SUB_ID AS SUBPRODUCT_CD, --код субпродукта
+	A.LOGIN_RK, 
+	COALESCE(L.EMPLOYEE_LOGIN, A.LOGIN_ID) AS LOGIN_ID, 	COALESCE(L.EMPLOYEE_NM, LL.EMPLOYEE_FULL_NM, LL.EMPLOYEE_SHORT_NM) AS LOGIN_NM,
+	A.PRODUCT_OPERATIONAL_RK,  --RK продукта   
+	A.APP_PRT_STATUS_CD AS APP_STATUS_ID --статус заявок на конец месяца +12 дней
+FROM DDS.APP_PRT_HIST A
+
+LEFT JOIN DDS.LOGIN_HIST LL 
+ON A.LOGIN_RK=LL.LOGIN_RK
+
+LEFT JOIN (
+SELECT
+	s.AGREEMENT_RK, 	l.LOGIN_ID AS EMPLOYEE_LOGIN, COALESCE(l.EMPLOYEE_FULL_NM, l.EMPLOYEE_SHORT_NM) AS EMPLOYEE_NM
+	FROM (
+		SELECT DISTINCT 
+		AGREEMENT_RK, LOGIN_RK, SOURCE_SYSTEM_CD, INPUT_DT, APP_PRT_STATUS_CD, PREV_APP_PRT_STATUS_CD, STATUS_START_DTTM
+		FROM DDS.APP_PRT_STATUS_HISTORY 
+		WHERE (APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') OR PREV_APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ')) AND DELETED_FLG = '0' AND IS_ACTIVE_FLG = '1'
+		AND EXISTS(SELECT * FROM )
+	) s	
+	INNER JOIN DDS.LOGIN_HIST l
+	ON l.LOGIN_RK = s.LOGIN_RK AND l.SOURCE_SYSTEM_CD = s.SOURCE_SYSTEM_CD AND (s.INPUT_DT BETWEEN l.EFFECTIVE_FROM_DTTM AND l.EFFECTIVE_TO_DTTM) AND l.DELETED_FLG = '0'
+	QUALIFY ROW_NUMBER() OVER (PARTITION BY s.AGREEMENT_RK ORDER BY s.STATUS_START_DTTM DESC) = 1
+) L
+ON A.AGREEMENT_RK = L.AGREEMENT_RK
+
+WHERE 
+A.APP_PRT_TYPE_CD = 'ЗАЯВКИ' AND A.PRODUCT_OPERATIONAL_RK IN (107, 81, 89, 6292) --отбираем продукты Коммерсант
+AND APPLICATION_DT BETWEEN ADD_MONTHS(MONTH_BEGIN(CURRENT_DATE),-3) AND ADD_MONTHS(MONTH_END(CURRENT_DATE),-1) 
+AND MONTH_END(APPLICATION_DT)+12 BETWEEN A.EFFECTIVE_FROM_DTTM AND A.EFFECTIVE_TO_DTTM --берем статусы заявок на конец месяца +12 дней
+
+QUALIFY ROW_NUMBER() OVER (PARTITION BY BRANCH_ID, APPLICATION_RK ORDER BY A.EFFECTIVE_FROM_DTTM DESC) =1
+) WITH DATA PRIMARY INDEX (APPLICATION_RK) ;
+
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+
+SELECT
+	s.AGREEMENT_RK, 	l.LOGIN_ID AS EMPLOYEE_LOGIN, COALESCE(l.EMPLOYEE_FULL_NM, l.EMPLOYEE_SHORT_NM) AS EMPLOYEE_NM
+	FROM (
+		SELECT DISTINCT 
+		s.AGREEMENT_RK, s.LOGIN_RK, s.SOURCE_SYSTEM_CD, s.INPUT_DT, s.APP_PRT_STATUS_CD, s.PREV_APP_PRT_STATUS_CD, s.STATUS_START_DTTM
+		FROM DDS.APP_PRT_STATUS_HISTORY s
+		WHERE (s.APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') OR s.PREV_APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ')) AND s.DELETED_FLG = '0' AND s.IS_ACTIVE_FLG = '1'
+		AND s.AGREEMENT_RK IN (
+			SELECT DISTINCT a.AGREEMENT_RK FROM DDS.APP_PRT_HIST a WHERE a.APP_PRT_TYPE_CD = 'ЗАЯВКИ' AND a.PRODUCT_OPERATIONAL_RK IN (107, 81, 89, 6292, 7312 /*7312 - ПШ*/) 
+		)
+	) s	
+	INNER JOIN DDS.LOGIN_HIST l
+	ON l.LOGIN_RK = s.LOGIN_RK AND l.SOURCE_SYSTEM_CD = s.SOURCE_SYSTEM_CD AND (s.INPUT_DT BETWEEN l.EFFECTIVE_FROM_DTTM AND l.EFFECTIVE_TO_DTTM) AND l.DELETED_FLG = '0'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY s.AGREEMENT_RK ORDER BY s.STATUS_START_DTTM DESC) = 1
+
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+-----------------------------------------------------
+
+
+
+
+
+
+
 
