@@ -1,0 +1,603 @@
+----------------------------------------------------------------------------------------------------------------------------1 .Справочник ТП, РОО, регионов, городов-----------------------------------------------------------------------------------------------------------------------------------------------
+--DROP TABLE MPSP_POS;
+CREATE TABLE MPSP_POS AS
+(
+ WITH
+ 	RECURSIVE hx (org_id, org_rk, lvl, parent_id, parent_rk, hierarchy_nm) AS (
+ 		SELECT
+		 	internal_org_id, internal_org_rk,
+		 	hierarhy_level,
+		 	parent_internal_org_id, parent_internal_org_rk,
+		 	org_hierarchy_cd
+		FROM dds.internal_org_hierarchy
+		WHERE
+		 	((org_hierarchy_cd = 'ACCESS' AND hierarhy_level IN (2, 3)) OR (org_hierarchy_cd = 'ГОИМДО' AND hierarhy_level IN (3, 4)))
+		 	AND
+		 	effective_from_dttm <= CURRENT_DATE
+		 	AND
+		 	effective_to_dttm >= CURRENT_DATE
+		 	AND
+		 	deleted_flg = 0 AND is_active_flg = 1
+		QUALIFY
+			ROW_NUMBER() OVER (PARTITION BY internal_org_rk ORDER BY CASE WHEN org_hierarchy_cd = 'ACCESS' THEN 1 ELSE 2 END ASC) = 1
+		 	
+		UNION ALL
+		
+		SELECT
+			hx.org_id, hx.org_rk,
+			h.hierarhy_level,
+			h.parent_internal_org_id, h.parent_internal_org_rk,
+			h.org_hierarchy_cd
+		FROM
+			hx
+			
+			JOIN
+				dds.internal_org_hierarchy h
+					ON
+						h.internal_org_rk = hx.parent_rk
+						AND
+						h.org_hierarchy_cd = hx.hierarchy_nm
+					 	AND
+					 	h.effective_from_dttm <= CURRENT_DATE
+					 	AND
+					 	h.effective_to_dttm >= CURRENT_DATE
+					 	AND
+					 	h.deleted_flg = 0 AND is_active_flg = 1
+	)
+SELECT
+	COALESCE(b.internal_org_id, o.internal_org_id) AS branch_id,
+	COALESCE(b.internal_org_nm, o.internal_org_nm) AS branch_nm,
+	o.internal_org_id AS office_id,
+	o.internal_org_nm AS office_nm,
+	o.internal_org_type_cd AS office_type,
+	p.internal_org_id AS pos_id,
+	p.internal_org_nm AS pos_nm,
+	p.internal_org_type_cd AS pos_type,
+	--p.vip_office_fl as vip_fl,
+	p.district_geography_cd AS district,
+	p.region_geography_cd AS region,
+	p.moscow_region_cd AS region_type,
+	p.city,
+	x.org_id,
+	x.org_rk
+	
+FROM
+	( SELECT
+			DISTINCT
+			org_id, org_rk, 
+			COALESCE(MIN(pos_rk) OVER (PARTITION BY org_rk), org_rk) AS pos_rk,
+			MIN(office_rk) OVER (PARTITION BY org_rk) AS office_rk
+		FROM
+			( SELECT
+					x.*,
+					CASE
+						WHEN hierarchy_nm = 'ГОИМДО' THEN 2 /* ГО */
+						WHEN hierarchy_nm = 'ACCESS' AND lvl = 2 THEN parent_rk
+					END AS office_rk,
+					CASE
+						WHEN (hierarchy_nm = 'ACCESS' AND lvl = 3) OR (hierarchy_nm = 'ГОИМДО' AND lvl = 4) THEN parent_rk
+					END AS pos_rk
+					 
+				FROM
+					hx x
+					
+					JOIN
+						dds.internal_org o
+							ON
+								o.internal_org_rk = x.parent_rk
+								AND
+								o.is_active_flg = 1
+			) x
+	) x
+	
+	LEFT JOIN
+		dds.internal_org o
+			ON
+				o.internal_org_rk = x.office_rk
+				AND
+				o.is_active_flg = 1
+				
+	LEFT JOIN
+		dds.internal_org p
+			ON
+				p.internal_org_rk = x.pos_rk
+				AND
+				p.is_active_flg = 1
+				
+	LEFT JOIN
+    dds.internal_org_hierarchy xb
+      ON
+        xb.internal_org_rk = x.pos_rk
+        AND
+        xb.org_hierarchy_cd = 'СВОД'
+        AND
+			 	xb.effective_from_dttm <= CURRENT_DATE
+			 	AND
+			 	xb.effective_to_dttm >= CURRENT_DATE
+			 	AND
+			 	xb.deleted_flg = 0 AND xb.is_active_flg = 1
+			 	
+	LEFT JOIN
+		dds.internal_org b
+			ON
+				b.internal_org_rk = xb.parent_internal_org_rk
+				AND
+				b.is_active_flg = 1
+
+UNION
+
+SELECT
+	o.internal_org_id AS branch_id,
+	o.internal_org_nm AS branch_nm,
+	o.internal_org_id AS office_id,
+	o.internal_org_nm AS office_nm,
+	o.internal_org_type_cd AS office_type,
+	o.internal_org_id AS pos_id,
+	o.internal_org_nm AS pos_nm,
+	o.internal_org_type_cd AS pos_type,
+	o.district_geography_cd AS district,
+	o.region_geography_cd AS region,
+	o.moscow_region_cd AS region_type,
+	o.city,
+	b.org_id,
+	b.org_rk
+FROM
+	(SELECT
+		internal_org_id AS org_id, internal_org_rk AS org_rk
+	FROM dds.internal_org_hierarchy
+		WHERE
+		 	org_hierarchy_cd = 'ACCESS'
+		 	AND
+		 	hierarhy_level = 1
+		 	AND
+		 	effective_from_dttm <= CURRENT_DATE
+		 	AND
+		 	effective_to_dttm >= CURRENT_DATE
+		 	AND
+		 	deleted_flg = 0 AND is_active_flg = 1
+	)b
+	
+	LEFT JOIN
+		dds.internal_org o
+			ON
+				o.internal_org_rk = b.org_rk
+				AND
+				o.is_active_flg = 1
+)
+WITH DATA
+PRIMARY INDEX(org_rk)
+;
+
+------------------------------------------------------------------------------------------------------------------------------2.Формируем перечень заявок за месяц-------------------------------------------------------------------------------------------------------------------------------------------------
+--DROP TABLE MPSP_APPL
+CREATE TABLE  MPSP_APPL AS 
+(
+SELECT A.SOURCE_SYSTEM_CD||A.APP_PRT_ID AS ID_APPL, --ID заявки + ID подразделения
+				A.OPEN_DT AS APPLICATION_DT, --дата заведения заявки
+				A.SOURCE_SYSTEM_CD AS BRANCH_ID, --ID подразделения
+				A.APP_PRT_ID AS APPLICATION_ID, --ID заявки
+				A.AGREEMENT_RK AS APPLICATION_RK,  --RK заявки                
+				A.CUSTOMER_RK, --RK клиента
+				A.CUSTOMER_TYPE_CD,              
+				A.INTERNAL_ORG_ID, --код подразделения-инициатора
+				A.INTERNAL_ORG_RK, --код подразделения-инициатора
+				A.PRODUCT_SUB_ID AS SUBPRODUCT_CD, --код субпродукта
+				A.LOGIN_RK,
+				COALESCE(L.EMPLOYEE_LOGIN, A.LOGIN_ID) AS LOGIN_ID,
+				COALESCE(L.EMPLOYEE_NM, LL.employee_full_nm, LL.employee_short_nm) AS LOGIN_NM,
+				A.PRODUCT_OPERATIONAL_RK,  --RK продукта   
+				A.APP_PRT_STATUS_CD AS APP_STATUS_ID --статус заявок на конец месяца +12 дней
+FROM DDS.APP_PRT_HIST A
+LEFT JOIN DDS.LOGIN_HIST LL 
+ON A.LOGIN_RK=LL.LOGIN_RK
+LEFT JOIN (
+	SELECT
+	s.AGREEMENT_RK, 	l.LOGIN_ID AS EMPLOYEE_LOGIN, COALESCE(l.EMPLOYEE_FULL_NM, l.EMPLOYEE_SHORT_NM) AS EMPLOYEE_NM
+	FROM (
+		SELECT DISTINCT AGREEMENT_RK, LOGIN_RK, SOURCE_SYSTEM_CD, INPUT_DT, APP_PRT_STATUS_CD, PREV_APP_PRT_STATUS_CD, STATUS_START_DTTM
+		FROM DDS.APP_PRT_STATUS_HISTORY 
+		WHERE (APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') OR PREV_APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ')) AND DELETED_FLG = '0' AND IS_ACTIVE_FLG = '1'
+		AND EXISTS(SELECT * FROM )
+	) s	
+	INNER JOIN DDS.LOGIN_HIST l
+	ON l.LOGIN_RK = s.LOGIN_RK AND l.SOURCE_SYSTEM_CD = s.SOURCE_SYSTEM_CD AND (s.INPUT_DT BETWEEN l.EFFECTIVE_FROM_DTTM AND l.EFFECTIVE_TO_DTTM) AND l.DELETED_FLG = '0'
+	QUALIFY ROW_NUMBER() OVER (PARTITION BY s.AGREEMENT_RK ORDER BY s.STATUS_START_DTTM DESC) = 1
+	) L
+ON A.AGREEMENT_RK = L.AGREEMENT_RK
+WHERE APPLICATION_DT BETWEEN ADD_MONTHS(MONTH_BEGIN(CURRENT_DATE - EXTRACT(DAY FROM CURRENT_DATE)),-2) AND (CURRENT_DATE - EXTRACT(DAY FROM CURRENT_DATE))
+AND A.APP_PRT_TYPE_CD = 'ЗАЯВКИ' --заявки
+AND A.PRODUCT_OPERATIONAL_RK IN (107, 81, 89, 6292) --отбираем продукты Коммерсант
+AND MONTH_END(APPLICATION_DT)+12 BETWEEN A.EFFECTIVE_FROM_DTTM AND A.EFFECTIVE_TO_DTTM --берем статусы заявок на конец месяца +12 дней
+QUALIFY ROW_NUMBER() OVER (PARTITION BY BRANCH_ID, APPLICATION_RK ORDER BY A.EFFECTIVE_FROM_DTTM DESC) =1
+)
+WITH DATA PRIMARY INDEX (APPLICATION_RK) 
+;
+
+----------------------------------------------------------------------------------------------------------------------------3.Подтягиваем транзакции--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--DROP TABLE MPSP_APPL_TRANSACTION;
+CREATE TABLE MPSP_APPL_TRANSACTION AS
+(SELECT 
+S.*,
+H.TRANSACTION_RK,
+H.APP_PRT_STAGE_CD AS LOGICAL_STAGE
+FROM MPSP_APPL S
+LEFT JOIN DDS.DATA_FLOW_LOG_NBSM_HIST H ON S.APPLICATION_RK=H.BIS_AGREEMENT_RK AND S.BRANCH_ID=H. BIS_SOURCE_SYSTEM_CD
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ID_APPL ORDER BY TRANSACTION_DTTM DESC) =1 --берем запись с более поздней датой транзакции
+)
+WITH DATA PRIMARY INDEX (ID_APPL) 
+;
+DROP TABLE MPSP_APPL;
+--------------------------------------------------------------------------------------------------------------------------------------------4. Для расчета AR-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+--DROP TABLE BUTEV.MPSP_DETAIL_MR;
+CREATE TABLE MPSP_DETAIL_MR AS 
+(
+SELECT	
+          t1.ID_APPL,
+		  t2.DECISION_CATEGORY_CD, 
+          t2.DECISION_CD, 
+          t2.DECISION_CD_INFO, 
+          t2.DECISION_DESC, 
+          t2.SRC_POST_CHECKS_DCAT, 
+		  t2.SRC_POST_CHECKS_DTEXT,
+		  t2.SRC_POST_CHECK_MSF_RC,
+          t2.SRC_POST_CHECK_MSF_RD,
+		  t2.SRC_POST_CHECKS_RC_TABLE,
+          t2.TRANSACTION_DTTM, 
+          t2.TRANSACTION_RK, 
+          t2.TRANSACTION_ID, 
+          t2.SCORING_COMMENT_DESC,
+		   t2. NBSM_DECISION_CD,
+		   CASE 
+		   WHEN t1.PRODUCT_OPERATIONAL_RK=81 THEN CUSTOMER_B2_SCORING_MARK
+		   WHEN t1.PRODUCT_OPERATIONAL_RK=107 THEN TOTAL_SCORING_MARK
+		   ELSE NULL 
+		   END SCORE
+ FROM MPSP_APPL_TRANSACTION  t1
+LEFT JOIN DDS.DATA_RESULT_NBSM t2
+	ON t1.TRANSACTION_RK = t2.TRANSACTION_RK
+    AND t2.SRC_POST_CHECKS_DCAT IS NOT NULL 
+	--AND t2.DECISION_CD IS NOT NULL
+) 
+WITH DATA PRIMARY INDEX (ID_APPL)
+;
+
+--------------------------Развернутый статус этапа прохождения заявки (00 мин.требования, 05 скоринг и пр.)
+
+CREATE TABLE MPSP_STAGE AS 
+(
+SELECT	 
+   	    T3.ID_APPL,
+		ST.APPLICATION_SUBSTATUS_CD
+FROM MPSP_APPL_TRANSACTION T3 
+LEFT JOIN DDS.APP_PRT_STAGE ST 
+	ON ST.APP_PRT_ID=T3.APPLICATION_ID 
+	AND ST.SOURCE_SYSTEM_CD=T3.BRANCH_ID
+WHERE ST.POSITIVE_DECISION_FLG = '0'  -- зачем это условме? Мы смотрим все решения
+AND ST.EFFECTIVE_FROM_DTTM<= TRUNC(ADD_MONTHS(T3.APPLICATION_DT, 1), 'mm')-1+12
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ID_APPL 
+ORDER BY APP_PRT_STAGE_DTTM DESC) =1 --берем запись с более поздней датой транзакции
+) 
+WITH DATA PRIMARY INDEX (ID_APPL)
+;
+
+--------------------------Определяем ГПР флаг
+CREATE TABLE MPSP_GPR AS 
+(
+SELECT	
+			  t1.*,
+			  t2.FLAG_GPR
+FROM
+(
+SELECT 
+DISTINCT 
+		  APP.APPLICATION_ID,
+		  APP.BRANCH_ID,
+		  APP.ID_APPL
+		  ----------не нужные поля?
+		  --HIS.APP_PRT_ID,  
+          --HIS.APP_PRT_STATUS_CD, 
+         -- HIS.APP_PRT_TYPE_CD, 
+         -- HIS.DELETED_FLG, 
+         -- HIS.IS_ACTIVE_FLG, 
+         -- HIS.PREV_APP_PRT_STATUS_CD, 
+        --  HIS.SOURCE_SYSTEM_CD, 
+         -- HIS.STATUS_START_DTTM          	  
+FROM MPSP_APPL_TRANSACTION APP 
+LEFT JOIN DDS.APP_PRT_STATUS_HISTORY HIS  
+	ON  HIS.APP_PRT_ID=APP.APPLICATION_ID 
+	AND HIS.SOURCE_SYSTEM_CD=APP.BRANCH_ID
+WHERE HIS.APP_PRT_STATUS_CD IN ( 'ЗАКР', 'АПИБ', 'АПИК', 'АПОС',
+		'ГПР,3,2|Принято', 'ГПР' ) AND  HIS.EFFECTIVE_FROM_DTTM<= TRUNC(ADD_MONTHS(APP.APPLICATION_DT, 1), 'mm')-1+12
+) AS t1
+LEFT JOIN
+(
+SELECT	
+DISTINCT 
+		  APP.ID_APPL,
+		  APP.APPLICATION_ID, 
+          APP.BRANCH_ID, 
+          'ГПР' AS FLAG_GPR
+FROM MPSP_APPL_TRANSACTION APP
+LEFT JOIN DDS.APP_PRT_STATUS_HISTORY HIS 
+	ON  HIS.APP_PRT_ID=APP.APPLICATION_ID 
+	AND HIS.SOURCE_SYSTEM_CD=APP.BRANCH_ID
+WHERE  HIS.APP_PRT_STATUS_CD = 'ГПР' AND  HIS.EFFECTIVE_FROM_DTTM<= TRUNC(ADD_MONTHS(APP.APPLICATION_DT, 1), 'mm')-1+12
+) AS t2
+	ON t1.ID_APPL = t2.ID_APPL
+) 
+WITH DATA PRIMARY INDEX (ID_APPL) 
+;
+
+
+/*Комитет*/
+CREATE TABLE MPSP_COMM AS 
+(
+SELECT	
+DISTINCT 
+		  SUBSTR(COM.APP_PRT_ID, 1, 16) AS APP_PRT_ID1, 
+        COM.LPR_POSITION_CD, 
+		  APP.ID_APPL
+FROM MPSP_APPL_TRANSACTION APP 
+LEFT JOIN DDS.APP_PRT_CREDIT_COMMITTEE_HIST COM 
+	ON  APP_PRT_ID1=APP.APPLICATION_ID 
+	AND COM.SOURCE_SYSTEM_CD=APP.BRANCH_ID
+   AND MONTH_END(APP.APPLICATION_DT)+12 >= COM.EFFECTIVE_FROM_DTTM  
+   AND APP.PRODUCT_OPERATIONAL_RK=81
+) 
+WITH	DATA PRIMARY INDEX (ID_APPL) 
+;
+------------------------------------------------------------------------------------------------------------------------------------------5. Итоговая таблица--------------------------------------------------------------------------------------------------------------------------------
+DROP TABLE MPSP_APP_AR_PD;
+CREATE TABLE MPSP_APP_AR_PD AS
+(
+SELECT
+T.ID_APPL,
+T.BRANCH_ID,
+P.branch_nm,
+P.office_id,
+P.office_nm,
+P.office_type,
+P.pos_id,
+T.INTERNAL_ORG_RK AS pos_rk,
+P.pos_nm,
+P.pos_type,
+P.district,
+P.region,
+P.region_type,
+P.CITY,
+T.APPLICATION_ID,
+T.APPLICATION_RK,
+T.APPLICATION_DT,
+T.SUBPRODUCT_CD,
+T.CUSTOMER_RK,
+T.CUSTOMER_TYPE_CD,
+T.PRODUCT_OPERATIONAL_RK,
+T.TRANSACTION_RK,
+T.LOGICAL_STAGE,
+T.LOGIN_RK,
+T.LOGIN_ID,
+T.LOGIN_NM,
+T.APP_STATUS_ID AS APP_STATUS,
+T2.APPLICATION_SUBSTATUS_CD,
+T1.SCORING_COMMENT_DESC,
+T1.SCORE,
+CASE 
+WHEN  TTDSegment='Scorable' THEN CAST(EXP(-0.0100991*SCORE + 2.182431)/(1 + EXP(-0.0100991*SCORE + 2.182431)) AS DECIMAL(18,8)) 
+ELSE NULL END 
+AS PD,
+CASE 
+		   --Статусы для PM
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%МИН.ТРЕБОВАНИЯ СПЗ' THEN 'Минимальные требования СПЗ'
+			WHEN T.APP_STATUS_ID = 'АППМ' THEN 'АППМ'
+			WHEN T.APP_STATUS_ID = 'АРПЗ' THEN 'АРПЗ'
+			WHEN T.APP_STATUS_ID = 'БВЛ' THEN 'БВЛ'
+			WHEN T.APP_STATUS_ID = 'В56' THEN  'В56'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%РАСЧЕТ ЛИМИТА%' 
+	AND T.PRODUCT_OPERATIONAL_RK=81 THEN 'Лимит'
+			
+			--Статусы для MN
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%ВЕРИФИКАЦИЯ ОТЧЕТНОСТИ' THEN 'Верификация'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%ВЫЕЗДНАЯ ПРОВЕРКА' THEN 'Выездная проверка'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T.PRODUCT_OPERATIONAL_RK=107
+	AND  (T2.APPLICATION_SUBSTATUS_CD LIKE '%СКОРРИНГ 1' 
+	OR T2.APPLICATION_SUBSTATUS_CD LIKE '%РАСЧЕТ ЛИМИТА') THEN 'Счетчики'
+            WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND  T.PRODUCT_OPERATIONAL_RK=107
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%СКОРИНГ 2' THEN 'Лимит'
+			--Статусф для PM+MN
+			WHEN T.APP_STATUS_ID = 'АПИК' THEN 'АПИК'
+			WHEN T.APP_STATUS_ID = 'БЗВ' THEN 'БЗВ'
+			WHEN T.APP_STATUS_ID = 'ВАЗ' THEN 'ВАЗ'
+			WHEN T.APP_STATUS_ID = 'ГПР' THEN 'ГПР'
+			WHEN T.APP_STATUS_ID = 'ЗАКР' THEN 'ЗАКР'
+			WHEN T.APP_STATUS_ID = 'АПОС' THEN  'АПОС'
+			WHEN T.APP_STATUS_ID = 'ОШБК' THEN 'ОШБК'
+			WHEN T.APP_STATUS_ID = 'АПИК' 
+	AND T3.FLAG_GPR = 'ГПР' THEN 'Одобрено'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%АНДЕРРАЙТИНГ' THEN 'Андеррайтинг'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%ПРОВЕРКА МОРАТОРИЯ' THEN 'Мораторий'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD IS NULL THEN 'Отказ бизнеса'
+	WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD IS NULL 
+	AND T4.LPR_POSITION_CD = 'ПМ_РМ' 
+	AND T.PRODUCT_OPERATIONAL_RK=81 THEN 'Лимит'
+	
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND 
+			(T2.APPLICATION_SUBSTATUS_CD LIKE '%ПРОВЕРКА МИНИМАЛЬНЫХ ТРЕБОВАНИЙ%' 
+			OR T2.APPLICATION_SUBSTATUS_CD LIKE '%МИНИМАЛЬНЫЕ ТРЕБОВАНИЯ' 
+			OR T2.APPLICATION_SUBSTATUS_CD LIKE '%ПОВТОРНЫЙ ПЕРЕСЧЕТ МИНИМАЛЬНЫХ ТРЕБОВАНИЙ')
+			THEN 'Минимальные требования'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND T2.APPLICATION_SUBSTATUS_CD LIKE '%АНАЛИЗ ЗАЯВКИ СПЗ' THEN 'СПЗ'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND (T2.APPLICATION_SUBSTATUS_CD LIKE '%СТОП-ФАКТОРЫ 2'  
+	OR T2.APPLICATION_SUBSTATUS_CD LIKE '%ПРЕДВАРИТЕЛЬНЫЙ РАСЧЕТ СТОП УСЛОВИЙ' )
+			THEN 'Стоп-факторы'
+			WHEN T.APP_STATUS_ID = 'АПИБ' 
+	AND (T2.APPLICATION_SUBSTATUS_CD LIKE '%ОЦЕНКА КРЕДИТНОЙ ИСТОРИИ' 
+	OR T2.APPLICATION_SUBSTATUS_CD LIKE '%ИНТЕГРАЛЬНЫЙ СКОРИНГ') THEN  'БКИ + Cкоринг'
+			ELSE '#Н/Д'
+		    END AS AppStatus,
+----------Считаем AR			
+CASE 
+   	WHEN AppStatus IN ('БЗВ', 'ВАЗ', 'ОШБК', 'БВЛ', 'В56') THEN 'In Process' 
+	WHEN LOGICAL_STAGE IN ('ВЕРИФ','СТОПФАКТ1','МИНТРЕБ','МИНТРЕБ2') THEN 'Unscorable'
+	WHEN AppStatus NOT IN ('БЗВ', 'ВАЗ', 'ОШБК', 'БВЛ', 'В56',  'ЗАКР', 'ГПР') AND  LOGICAL_STAGE IS NULL THEN 'Unscorable'
+ELSE 'Scorable'
+END	TTDSegment, ---------------статус на 12 число месяца за месяцем заведения заявки
+CASE 
+	WHEN AppStatus IN ('ЗАКР', 'ГПР', 'Одобрено') THEN 1 
+	ELSE 0 
+END	AR_Flg,	
+CASE 
+	WHEN AppStatus IN ('ЗАКР', 'ГПР', 'Одобрено',  'Стоп-факторы',
+		'Мораторий', 'Верификация', 'АПИК',  'АПОС', 'АППМ' , 'Отказ бизнеса', 'Андеррайтинг' ) THEN 1 
+	ELSE 0 
+END	AR_DAR_Flg,
+CASE WHEN  AppStatus IN ('Выездная проверка', 'СПЗ') THEN 1 ELSE 0 END AS SPZ_VP_Flg
+FROM MPSP_APPL_TRANSACTION T
+LEFT JOIN MPSP_DETAIL_MR T1 
+	ON T.ID_APPL=T1.ID_APPL
+LEFT JOIN MPSP_STAGE T2 
+	ON T.ID_APPL=T2.ID_APPL
+LEFT JOIN MPSP_GPR T3 	
+	ON T.ID_APPL=T3.ID_APPL
+LEFT JOIN MPSP_COMM T4
+    ON T.ID_APPL=T4.ID_APPL
+LEFT JOIN MPSP_POS P ON P.org_rk=T.INTERNAL_ORG_RK
+)
+WITH DATA PRIMARY INDEX (ID_APPL)
+;
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+DROP TABLE mpsp_ar_pd_agg;
+CREATE TABLE mpsp_ar_pd_agg AS
+(SELECT 
+MONTH_BEGIN(a.application_dt) AS generation_dt,
+a.pos_id, a.pos_nm, a.office_id || ' ' || a.office_nm AS roo_name, a.city, 
+COALESCE(b.employee_nm, a.login_nm) AS employee_nm,
+SUM(a.AR_Flg) AS Appr, 
+SUM(a.AR_DAR_Flg) AS Appr_DAR, 
+SUM(a.SPZ_VP_Flg) AS Rej_SPZ_VP,
+SUM(CASE WHEN a.TTDSegment = 'In Process' THEN 0 ELSE 1 END) AS Processed,
+SUM(CASE WHEN a.TTDSegment = 'Scorable' THEN 1 ELSE 0 END) AS Scorable,
+COUNT(a.application_rk) AS Total,
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_avg,
+c.PD_gen, d.PD_bnk
+
+
+FROM mpsp_app_ar_pd a
+
+LEFT JOIN
+(SELECT
+a.application_rk,
+l.login_id AS employee_login,
+COALESCE(l.employee_full_nm, l.employee_short_nm) AS employee_nm
+FROM
+mpsp_app_ar_pd a
+
+JOIN
+dds.app_prt_status_history s
+ON s.agreement_rk = a.application_rk
+AND (s.app_prt_status_cd IN ('БЗВ', 'БЗВ|БЗВ') OR s.prev_app_prt_status_cd IN ('БЗВ', 'БЗВ|БЗВ'))
+AND s.deleted_flg = '0'
+
+JOIN
+dds.login_hist l
+ON l.login_rk = s.login_rk
+AND l.source_system_cd = a.branch_id
+AND l.effective_from_dttm <= s.input_dt
+AND l.effective_to_dttm >= s.input_dt
+AND l.deleted_flg = '0'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY a.application_rk ORDER BY s.status_start_dttm DESC) = 1
+) b
+
+ON a.application_rk = b.application_rk
+
+LEFT JOIN
+(SELECT 
+MONTH_BEGIN(a.application_dt) AS generation_dt,
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_gen
+FROM mpsp_app_ar_pd a
+GROUP BY MONTH_BEGIN(a.application_dt)
+) c
+ON MONTH_BEGIN(a.application_dt) = c.generation_dt
+
+CROSS JOIN
+(SELECT 
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_bnk
+FROM mpsp_app_ar_pd a
+) d
+
+GROUP BY 
+MONTH_BEGIN(a.application_dt),
+a.pos_id, 
+a.pos_nm, 
+a.login_nm,
+roo_name, 
+a.city, 
+employee_nm,
+PD_gen,
+PD_bnk
+) WITH DATA;
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+DROP TABLE pos_ar_pd_agg;
+CREATE TABLE pos_ar_pd_agg AS
+(SELECT 
+MONTH_BEGIN(a.application_dt) AS generation_dt,
+a.pos_id, a.pos_nm, a.office_id || ' ' || a.office_nm AS roo_name, a.city, 
+SUM(a.AR_Flg) AS Appr, 
+SUM(a.AR_DAR_Flg) AS Appr_DAR, 
+SUM(a.SPZ_VP_Flg) AS Rej_SPZ_VP,
+SUM(CASE WHEN a.TTDSegment = 'In Process' THEN 0 ELSE 1 END) AS Processed,
+SUM(CASE WHEN a.TTDSegment = 'Scorable' THEN 1 ELSE 0 END) AS Scorable,
+COUNT(a.application_rk) AS Total,
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_avg,
+b.PD_gen, c.PD_bnk
+
+FROM mpsp_app_ar_pd a
+LEFT JOIN
+(SELECT 
+MONTH_BEGIN(a.application_dt) AS generation_dt,
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_gen
+FROM mpsp_app_ar_pd a
+GROUP BY MONTH_BEGIN(a.application_dt)
+) b
+ON MONTH_BEGIN(a.application_dt) = b.generation_dt
+
+CROSS JOIN
+(SELECT 
+AVG(CASE WHEN a.TTDSegment = 'Scorable' THEN PD ELSE NULL END) AS PD_bnk
+FROM mpsp_app_ar_pd a
+) c
+
+GROUP BY 
+MONTH_BEGIN(a.application_dt),
+a.pos_id, 
+a.pos_nm, 
+roo_name, 
+a.city,
+PD_gen,
+PD_bnk
+) WITH DATA;
+
+--SELECT * FROM MPSP_APP_AR_PD;
+
+
+DROP TABLE MPSP_COMM;
+DROP TABLE MPSP_DETAIL_MR;
+DROP TABLE MPSP_GPR;
+DROP TABLE MPSP_POS;
+DROP TABLE MPSP_STAGE;
+DROP TABLE MPSP_APPL_TRANSACTION;
+
+
