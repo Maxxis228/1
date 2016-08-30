@@ -1,0 +1,2302 @@
+/*
+?RDS_REPORT_DT
+?RDS_GL_FIFO_FLG --0
+?RDS_DLQ_MONTH_MAX_FLG-- 0
+?RDS_DELINQUENCY_METHOD -- FIFO
+?RDS_ANALYTIC_TASK  -- 80
+?RDS_DELINQUENCY_RANGE_SET  --'146'
+*/
+
+
+/* **********************************************************************************************************
+ДАТЫ BUSINESS_DT для расчета KPI_MOB
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_DT;
+CREATE TABLE VINTAGE_DT AS
+(SELECT DISTINCT
+	c.CALENDAR_DT AS BUSINESS_DT
+FROM
+	DDS.DIM_CALENDAR_HIST AS c
+WHERE 1=1
+	AND c.CALENDAR_DT BETWEEN DATE '2012-01-01'
+	AND CAST('?RDS_REPORT_DT' AS DATE)
+	AND c.CALENDAR_DT = ADD_MONTHS(c.CALENDAR_DT, 1) - EXTRACT(DAY FROM CAST(ADD_MONTHS(c.CALENDAR_DT, 1) AS DATE FORMAT 'dd.mm.yyyy'))
+	AND c.DELETED_FLG = '0'	  
+	AND is_active_flg = '1'
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT); 
+ ----------------------------------------------------------------------------------------------------------------------------
+ 
+ 
+ 
+/* **********************************************************************************************************
+Диапазоны
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_RANGE;
+CREATE TABLE VINTAGE_RANGE AS
+(SELECT
+	rng.RANGE_BEGIN_DAYS_CNT,
+	rng.RANGE_END_DAYS_CNT,
+	rng.DELINQUENCY_RANGE_NM,
+	rng.RANGE_ORDER_NUM AS RANGE_ORDER_ID
+FROM
+	CDM.MREF_DELINQUENCY_RANGE AS rng
+WHERE
+	rng.DELINQUENCY_RANGE_SET_CD = '146' --?RDS_DELINQUENCY_RANGE_SET -- '146'
+	AND rng.DELETED_FLG = '0'
+	AND rng.EFFECTIVE_TO_DTTM = '5999-12-31 00:00:00' --&MAX_DTTM
+) WITH DATA
+PRIMARY INDEX (RANGE_ORDER_ID);  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+Выбор ПРОДУКТА и Макропродукта
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_PRODUCT;
+CREATE TABLE VINTAGE_PRODUCT AS
+(SELECT
+	DISTINCT --- ранее в справочнике были обнаружены дубли. 
+	apst.PRODUCT_ACTUAL_CD,
+----	
+	apst2.ANALYTIC_TASK_CD AS GR_ANALYTIC_TASK_CD,
+	apst2.PRODUCT_ANALYTIC_CD AS GR_PRODUCT_ANALYTIC_CD,
+	mapd2.PRODUCT_ANALYTIC_DESC AS GR_PRODUCT_ANALYTIC_NM,
+----	
+	apst.ANALYTIC_TASK_CD,
+	apst.PRODUCT_ANALYTIC_CD,
+	mapd.PRODUCT_ANALYTIC_DESC,
+	mapd.FIRST_PAYMENT_MONTH AS FIRST_PAYMENT_MONTH
+FROM CDM.MREF_PRODUCT_ANALYTIC_STRUCTUR AS apst
+	LEFT JOIN CDM.MREF_PRODUCT_ANALYTIC AS mapd
+           ON ( 1=1
+				AND apst.PRODUCT_ANALYTIC_CD = mapd.PRODUCT_ANALYTIC_CD
+				AND mapd.EFFECTIVE_TO_DTTM =  '5999-12-31 00:00:00' --&MAX_DTTM
+				AND mapd.DELETED_FLG = '0'
+			)
+	LEFT JOIN CDM.MREF_PRODUCT_ANALYTIC_STRUCTUR AS apst2
+		ON( 1=1
+				AND apst2.PRODUCT_ACTUAL_CD = apst.PRODUCT_ACTUAL_CD
+				AND apst2.ANALYTIC_TASK_CD = 1
+				AND apst2.EFFECTIVE_TO_DTTM = '5999-12-31 00:00:00' --&MAX_DTTM
+				AND apst2.DELETED_FLG = '0'
+		)
+	LEFT JOIN CDM.MREF_PRODUCT_ANALYTIC AS mapd2
+           ON ( 1=1
+				AND apst2.PRODUCT_ANALYTIC_CD = mapd2.PRODUCT_ANALYTIC_CD
+				AND mapd2.EFFECTIVE_TO_DTTM = '5999-12-31 00:00:00' --&MAX_DTTM
+				AND mapd2.DELETED_FLG = '0'
+			)			
+WHERE 1=1
+---------------------------------------------------------------------------------------------------------
+	AND apst.PRODUCT_ANALYTIC_CD IN (57,58,136,557,558) -- IN (72,222,322) --Коммерсант ФЛ, ЮЛ, РЛ
+---------------------------------------------------------------------------------------------------------
+	AND apst.ANALYTIC_TASK_CD = 80 --?RDS_ANALYTIC_TASK --- 80
+	AND apst.EFFECTIVE_TO_DTTM = '5999-12-31 00:00:00' --&MAX_DTTM
+	AND apst.DELETED_FLG = '0'
+) WITH DATA
+PRIMARY INDEX (PRODUCT_ACTUAL_CD);
+ ----------------------------------------------------------------------------------------------------------------------------    
+
+/* **********************************************************************************************************
+Типы сделок в разрезе договоров по протоколу  
+-- Наличие нетиповых условий
+-- Наличие изменения сущ. условий
+А также информация по ГСЗ
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_PROT;
+CREATE TABLE VINTAGE_PROT AS
+(SELECT 
+	pro.APPLICATION_AGREEMENT_RK,
+	pro.APP_PRT_AMT,
+	pro.GSZ_LIMIT_GROUP_1_AMT,									-- лимит на ГСЗ1
+	COALESCE(pro.DEAL_TYPE_CD, '01' ) AS DEAL_TYPE_CD  --тип сделки 
+FROM DDS.APP_PRT_HIST AS pro
+WHERE 1=1
+	AND CAST(CAST('?RDS_REPORT_DT' AS DATE) AS TIMESTAMP(0)) BETWEEN pro.EFFECTIVE_FROM_DTTM AND pro.EFFECTIVE_TO_DTTM
+	AND pro.DELETED_FLG = '0'
+	AND pro.APPLICATION_AGREEMENT_RK <> -1
+	AND pro.PRODUCT_OPERATIONAL_ID IN ('МН', 'ПМ', 'ПШ', 'ПЭ', 'ПЯ', 'РЛ', 'РМ', 'РЦ', 'РЮ')
+1 = 1
+	QUALIFY ROW_NUMBER() OVER(PARTITION BY pro.APPLICATION_AGREEMENT_RK ORDER BY pro.OPEN_DT DESC, pro.APP_PRT_ID DESC) = 1
+) WITH DATA
+PRIMARY INDEX (APPLICATION_AGREEMENT_RK);
+----------------------------------------------------------------------------------------------------------------------------    
+
+
+
+/* **********************************************************************************************************
+Анализируемые договора 
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_AGREEMENT;
+CREATE TABLE VINTAGE_AGREEMENT AS 
+(SELECT
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.CUR_AGREEMENT_RK AS AGREEMENT_RK,
+	dar.PRODUCT_ACTUAL_CD,
+	dar.PRODUCT_OPERATIONAL_ID,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	dar.RBP_FLG,							-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	dar.CURRENCY_ISO_CD,
+	dar.GENERATION_DT,				-- Поколение
+	dar.ISSUE_AMT,
+	dar.ISSUE_RUR_AMT,
+	dar.MIGR_INIT_EXTRA_OFFICE_RK, -- ТП
+	dar.CONTRACT_TYPE_CD,
+	dar.CONTRACT_ID,
+	dar.APPLICATION_RK, 				
+	dar.GENERATION_BALANCE_DT,
+	dar.OUTSTANDING_FLG AS BALANCE_FLG,
+	dar.SOURCE_SYSTEM_CD,
+	
+	prod.GR_PRODUCT_ANALYTIC_CD,
+	TRIM(CAST(CAST(prod.GR_ANALYTIC_TASK_CD AS INTEGER FORMAT '9(3)') AS VARCHAR(3)))
+		|| '.' || TRIM(CAST(CAST(prod.GR_PRODUCT_ANALYTIC_CD AS INTEGER FORMAT '9(3)') AS VARCHAR(3)))
+		|| '. ' || prod.GR_PRODUCT_ANALYTIC_NM AS GR_PRODUCT_NM,
+	
+	prod.PRODUCT_ANALYTIC_CD,
+	TRIM(CAST(CAST(prod.ANALYTIC_TASK_CD AS INTEGER FORMAT '9(3)') AS VARCHAR(3)))
+		|| '.' || TRIM(CAST(CAST(prod.PRODUCT_ANALYTIC_CD AS INTEGER FORMAT '9(3)') AS VARCHAR(3)))
+		|| '. ' || prod.PRODUCT_ANALYTIC_DESC AS PRODUCT_NM,
+	prod.FIRST_PAYMENT_MONTH
+	
+FROM
+	CDM.AGG_LOAN_ISSUE_DAR AS dar
+		INNER JOIN VINTAGE_PRODUCT AS prod
+		ON( 1=1
+				AND CAST('?RDS_REPORT_DT' AS DATE) = dar.REPORT_DT
+				AND dar.ISSUE_DT BETWEEN DATE '2012-01-01' AND CAST('?RDS_REPORT_DT' AS DATE) ------->??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+				AND prod.PRODUCT_ACTUAL_CD = dar.PRODUCT_ACTUAL_CD  
+			) 
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);    
+----------------------------------------------------------------------------------------------------------------------------    
+
+
+  
+/* **********************************************************************************************************
+Информация о лимите выдачи. (первоначальный лимит - ловим 0 лимиты)
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_AGREEMENT_LIM;
+CREATE TABLE VINTAGE_AGREEMENT_LIM AS 
+(SELECT 
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	cla.CREDIT_LIMIT_AMT,
+	cla.LOAN_AMT
+FROM
+	VINTAGE_AGREEMENT  dar
+	LEFT JOIN CDM.CD_LOAN_AGREEMENT AS cla
+		ON(	cla.AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+				AND cla.DELETED_FLG = '0'
+				AND cla.CONTRACT_STATUS_CD NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ')
+			) 
+WHERE 1 = 1
+	QUALIFY ROW_NUMBER() OVER (PARTITION BY dar.MIGR_ROOT_AGREEMENT_RK ORDER BY cla.EFFECTIVE_FROM_DTTM ) =1
+)  WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);    
+----------------------------------------------------------------------------------------------------------------------------
+  
+ 
+  
+/* **********************************************************************************************************
+Сделки в разарезе договоров по протоколу  
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_APP_1;
+CREATE TABLE VINTAGE_APP_1 AS
+(SELECT
+	agr.MIGR_ROOT_AGREEMENT_RK,
+	a.APPLICATION_RK,
+	a.NULL_LIMIT_FLG,						-- нулевой лимит в заявке
+	a.ASSBAA_NEGATIVE_COMMENT_CODE,	-- Негативное заменчание (СПЗ)  --Результат проверки СПЗ
+	a.CONNECTED_LIAB_AMT,							-- Совокупный лимит на ГСЗ  (фИЛЬТР )
+	a.SOURCE_SYSTEM_CD
+FROM 
+	VINTAGE_AGREEMENT agr
+	INNER JOIN CDM.AGG_APPLICATION_FLAG AS a 
+		ON (	a.APPLICATION_RK = agr.APPLICATION_RK )
+WHERE 1=1
+	QUALIFY ROW_NUMBER() OVER (PARTITION BY a.APPLICATION_RK ORDER BY a.ACTUALIZATION_DT DESC ) =1  --- самая последняя актуальная запись из доступных
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+/* **********************************************************************************************************
+
+********************************************************************************************************** */		
+DROP TABLE  VINTAGE_APP_2;
+CREATE TABLE VINTAGE_APP_2 AS
+(SELECT 
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.APPLICATION_RK,
+	dar.GR_PRODUCT_ANALYTIC_CD,
+	app.RISK_MANAGER_LOGIN_ID,
+	COALESCE(app.RISK_MANAGER_LOGIN_RK,  -1) AS RISK_MANAGER_LOGIN_RK,
+	app.SOURCE_SYSTEM_CD
+FROM
+	VINTAGE_AGREEMENT AS dar 
+	INNER JOIN CDM.CD_APPLICATION AS app 
+		ON(	1=1
+				AND app.APPLICATION_RK = dar.APPLICATION_RK
+				AND app.CHILD_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK 
+				AND CAST(CAST('?RDS_REPORT_DT' AS DATE) AS TIMESTAMP(0)) BETWEEN app.EFFECTIVE_FROM_DTTM AND app.EFFECTIVE_TO_DTTM
+				AND app.DELETED_FLG = '0'
+			)
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+--------------------------------------------------------------
+
+
+
+  
+/* **********************************************************************************************************
+Информация о сотрудниках, создавших заявки, переводивших заявку в кред. договор,
+проводивших проверку СПЗ, берется из таблицы CDM CD_APPLICATION.
+
+Информация о лицах, принимавших решение по заявка на кредитном комитете,
+берется из таблицы детального слоя APP_PRT_CREDIT_COMMITTEE_HIST
+(поле Суррогатный ключ подписавшего пользователя). Соответствующие логины
+пользователей, голосовавших по каждой заявке (точнее, протоколу), записываются в одну строчке.
+------
+вспомогательная таблица - лица, принимавшие решение по заявке на последнем заседании КК
+********************************************************************************************************** */		 
+DROP TABLE VINTAGE_COMM_0;
+CREATE TABLE VINTAGE_COMM_0 AS
+(SELECT 
+	app.MIGR_ROOT_AGREEMENT_RK,
+	app.APPLICATION_RK,
+	app_prt.APP_PRT_ID,
+	app_prt.LPR_POSITION_NM,
+	app_prt.LPR_POSITION_CD,
+	app_prt.MEMBER_NUM,
+	app_prt.SIGNATURE_LOGIN_RK,
+	app_prt.SIGNATURE_EMPLOYEE_NM
+FROM
+	VINTAGE_AGREEMENT   AS app 
+	LEFT JOIN DDS.APP_PRT_CREDIT_COMMITTEE_HIST AS app_prt
+		ON( app.APPLICATION_RK = app_prt.APPLICATION_AGREEMENT_RK
+				AND CAST(CAST('?RDS_REPORT_DT' AS DATE) AS TIMESTAMP(0)) BETWEEN app_prt.EFFECTIVE_FROM_DTTM AND app_prt.EFFECTIVE_TO_DTTM
+				AND app_prt.DELETED_FLG = '0'
+            )
+WHERE 
+	1 = 1 QUALIFY ROW_NUMBER() OVER (PARTITION BY app.MIGR_ROOT_AGREEMENT_RK,  APP_PRT_ID, MEMBER_NUM ORDER BY OPEN_DT DESC) = 1			
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK, APP_PRT_ID, MEMBER_NUM);
+--------------------------------------------------------------
+
+
+/* **********************************************************************************************************
+Риск менеджеры в привязке к договору 
+********************************************************************************************************** */		 
+DROP TABLE VINTAGE_COMM_01;
+CREATE TABLE VINTAGE_COMM_01 AS
+(
+		SELECT
+			MIGR_ROOT_AGREEMENT_RK,
+			MAX(APP_PRT_ID) AS APP_PRT_ID
+		FROM 
+			VINTAGE_COMM_0 
+		GROUP BY 
+			MIGR_ROOT_AGREEMENT_RK
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+--------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+/* **********************************************************************************************************
+Риск менеджеры в привязке к договору 
+********************************************************************************************************** */		 
+DROP TABLE VINTAGE_COMM_02;
+CREATE TABLE VINTAGE_COMM_02 AS
+(SELECT 
+	comm.MIGR_ROOT_AGREEMENT_RK,
+	comm.APPLICATION_RK,
+	comm.LPR_POSITION_NM,
+	comm.MEMBER_NUM,
+	comm.LPR_POSITION_CD,
+	comm.SIGNATURE_LOGIN_RK,
+	comm.SIGNATURE_EMPLOYEE_NM
+FROM
+	VINTAGE_COMM_0 AS comm 
+	INNER JOIN VINTAGE_COMM_01 comm1
+		ON comm.MIGR_ROOT_AGREEMENT_RK = comm1.MIGR_ROOT_AGREEMENT_RK
+		AND comm.APP_PRT_ID = comm1.APP_PRT_ID
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK, MEMBER_NUM);
+--------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+Риск менеджеры в привязке к договору 
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_LOGIN_00;
+CREATE TABLE VINTAGE_LOGIN_00 AS
+(SELECT 
+	comm.MIGR_ROOT_AGREEMENT_RK,
+	comm.APPLICATION_RK,
+	comm.MEMBER_NUM,
+	comm.SIGNATURE_LOGIN_RK AS RISK_MANAGER_LOGIN_RK,
+	comm.SIGNATURE_EMPLOYEE_NM AS RISK_MANAGER_NM
+FROM
+	VINTAGE_COMM_02 AS comm 
+	LEFT JOIN   CDM.TREF_POSITION_GROUP AS pos_group ON
+		(
+               comm.LPR_POSITION_CD = pos_group.POSITION_CD
+               AND UPPER(pos_group.POSITION_GROUP_CD) = 'РМ'
+               AND CAST(CAST('?RDS_REPORT_DT' AS DATE)AS TIMESTAMP(0)) BETWEEN pos_group.EFFECTIVE_FROM_DTTM AND pos_group.EFFECTIVE_TO_DTTM
+		)
+WHERE
+	(	UPPER(comm.LPR_POSITION_NM) LIKE 'РИСК%'
+		OR UPPER(pos_group.POSITION_GROUP_CD) = 'РМ'
+	)
+	AND 
+		1 = 1 QUALIFY ROW_NUMBER() OVER (PARTITION BY MIGR_ROOT_AGREEMENT_RK ORDER BY MEMBER_NUM ) = 1	-- берем первую запись о РМ
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+--------------------------------------------------------------
+
+
+ 
+/* **********************************************************************************************************
+Лиц принимавшие решения за исключением риск менеджеров (они в отдельном столбце)
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_COMM;
+CREATE TABLE VINTAGE_COMM AS
+(SELECT 
+	comm.MIGR_ROOT_AGREEMENT_RK,
+	comm.APPLICATION_RK,
+	comm.MEMBER_NUM,  
+	comm.SIGNATURE_LOGIN_RK,
+	comm.SIGNATURE_EMPLOYEE_NM,
+	comm.LPR_POSITION_NM AS SIGNATURE_POSITION_NM
+FROM
+	VINTAGE_COMM_02 AS comm 
+	LEFT JOIN VINTAGE_LOGIN_00  lg
+		ON  comm.MIGR_ROOT_AGREEMENT_RK = lg.MIGR_ROOT_AGREEMENT_RK
+				AND comm.SIGNATURE_LOGIN_RK = lg.RISK_MANAGER_LOGIN_RK
+WHERE	
+	 lg.RISK_MANAGER_LOGIN_RK IS NULL
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK, MEMBER_NUM);
+--------------------------------------------------------------
+
+
+ 
+/* **********************************************************************************************************
+---- 1 -----  Определяем Login ID сотрдуникаов принимавших решение
+Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_COMM_1;
+CREATE TABLE VINTAGE_COMM_1 AS
+(SELECT
+	cmm.MIGR_ROOT_AGREEMENT_RK,
+	cmm.APPLICATION_RK,
+----
+	lgn.LOGIN_ID,
+	cmm.SIGNATURE_LOGIN_RK,
+	cmm.SIGNATURE_EMPLOYEE_NM,
+	cmm.SIGNATURE_POSITION_NM,
+	ROW_NUMBER() OVER (PARTITION BY cmm.MIGR_ROOT_AGREEMENT_RK  ORDER BY cmm.MEMBER_NUM DESC) AS MEMBER_NUM -- нумерация может начинаяться как с 0 так и с  1
+FROM
+	VINTAGE_COMM AS cmm --- !! кто выдввал с кос+
+	LEFT JOIN /*PROD_V_DDS*/ DDS.LOGIN_HIST AS lgn
+		ON(	cmm.SIGNATURE_LOGIN_RK = lgn.LOGIN_RK
+				AND CAST(CAST('?RDS_REPORT_DT' AS DATE) AS TIMESTAMP(0)) BETWEEN lgn.EFFECTIVE_FROM_DTTM AND lgn.EFFECTIVE_TO_DTTM
+				AND lgn.DELETED_FLG = '0'
+            )
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK, MEMBER_NUM);
+--------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+---- 2 -----  Через рекурсию формируем список лиц принимавших решение
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_COMM_2;
+CREATE TABLE VINTAGE_COMM_2 AS
+(WITH RECURSIVE REAL_LOGIN (MIGR_ROOT_AGREEMENT_RK, LOGIN_ID, SIGNATURE_EMPLOYEE_NM, SIGNATURE_NM, SIGNATURE_LOGIN_ID, SIGNATURE_POS_NM, MEMBER_NUM, N) AS
+		(
+			SELECT
+				MIGR_ROOT_AGREEMENT_RK, 
+				LOGIN_ID, 
+				SIGNATURE_EMPLOYEE_NM,
+				CAST( COALESCE(SIGNATURE_EMPLOYEE_NM,'') AS VARCHAR(800)) AS SIGNATURE_NM,
+				CAST( COALESCE(LOGIN_ID,'') AS VARCHAR(200)) AS SIGNATURE_LOGIN_ID,
+				CAST( COALESCE(SIGNATURE_POSITION_NM,'') AS VARCHAR(800)) AS SIGNATURE_POS_NM,
+				MEMBER_NUM,
+				0 AS n
+			FROM 
+				VINTAGE_COMM_1 
+			WHERE 
+				MEMBER_NUM = 1 
+						
+		UNION ALL
+					
+			SELECT
+				b.MIGR_ROOT_AGREEMENT_RK, 
+				a.LOGIN_ID, 
+				a.SIGNATURE_EMPLOYEE_NM,
+				CAST( COALESCE(b.SIGNATURE_NM,'') || ';  ' || COALESCE(a.SIGNATURE_EMPLOYEE_NM,'') AS VARCHAR(800)) AS SIGNATURE_NM,
+				CAST( COALESCE(b.SIGNATURE_LOGIN_ID,'') || ';  ' || COALESCE(a.LOGIN_ID,'') AS VARCHAR(200)) AS SIGNATURE_LOGIN_ID,
+				CAST( COALESCE(b.SIGNATURE_POS_NM,'') || ';  ' || COALESCE(a.SIGNATURE_POSITION_NM,'') AS VARCHAR(800)) AS SIGNATURE_POS_NM,
+				a.MEMBER_NUM,
+				b.n + 1
+			FROM
+				VINTAGE_COMM_1 a
+				INNER JOIN real_login b
+					ON(	a.MIGR_ROOT_AGREEMENT_RK = b.MIGR_ROOT_AGREEMENT_RK
+							----
+							AND a.MEMBER_NUM = b.MEMBER_NUM+1 --- AND a.LOGIN_ID > b.LOGIN_ID
+							-----
+							AND b.n < 10
+						)
+		)
+SELECT
+	a.MIGR_ROOT_AGREEMENT_RK,
+	a.SIGNATURE_NM,
+	a.SIGNATURE_LOGIN_ID,
+	a.SIGNATURE_POS_NM
+FROM
+	REAL_LOGIN a
+WHERE
+	1=1 QUALIFY ROW_NUMBER() OVER (PARTITION BY a.MIGR_ROOT_AGREEMENT_RK ORDER BY n DESC ) =1
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+--------------------------------------------------------------
+ 
+
+
+/* **********************************************************************************************************
+
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_LOGIN_0X;
+CREATE TABLE VINTAGE_LOGIN_0X AS
+(SELECT 
+	RISK_MANAGER_LOGIN_RK,
+	MAX(RISK_MANAGER_NM) AS RISK_MANAGER_NM  -- иногда ФИО выгруженны не полностью, поэтому выбираем максимальное значение.
+FROM
+	VINTAGE_LOGIN_00 AS lg 
+WHERE -- убираем пустышки 
+	RISK_MANAGER_NM <> ''  
+	AND UPPER(COALESCE(RISK_MANAGER_NM, 'N/A')) <> 'N/A'
+GROUP BY 
+	RISK_MANAGER_LOGIN_RK	
+) WITH DATA
+PRIMARY INDEX (RISK_MANAGER_LOGIN_RK);
+--------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+Логины из HIST которые не привязались в протоколах
+********************************************************************************************************** */		
+DROP TABLE  VINTAGE_LOGIN_01;
+CREATE TABLE VINTAGE_LOGIN_01 AS 
+(
+				SELECT
+					lg.RISK_MANAGER_LOGIN_RK,
+					MAX(COALESCE(EMPLOYEE_FULL_NM, EMPLOYEE_SHORT_NM)) AS RISK_MANAGER_NM
+				FROM VINTAGE_LOGIN_00 lg
+					INNER JOIN DDS.LOGIN_HIST h   -- В будущем заменить на объект CDM с логинами (объект запланирован к в разработке)
+						ON( 1=1
+								AND ( UPPER(COALESCE(lg.RISK_MANAGER_NM, 'N/A')) = 'N/A' OR lg.RISK_MANAGER_NM = '' )
+								AND h.LOGIN_RK = lg.RISK_MANAGER_LOGIN_RK
+								AND CAST('?RDS_REPORT_DT' AS DATE) BETWEEN h.EFFECTIVE_FROM_DTTM AND h.EFFECTIVE_TO_DTTM
+								AND h.DELETED_FLG='0'
+							)
+				GROUP BY 
+					lg.RISK_MANAGER_LOGIN_RK
+) WITH DATA
+PRIMARY INDEX (RISK_MANAGER_LOGIN_RK);
+--------------------------------------------------------------
+
+
+
+
+
+/* **********************************************************************************************************
+Риск менеджеры
+********************************************************************************************************** */		 
+DROP TABLE  VINTAGE_LOGIN_02;
+CREATE TABLE VINTAGE_LOGIN_02 AS
+(SELECT 
+	DISTINCT
+	lg0.MIGR_ROOT_AGREEMENT_RK,
+	lg0.RISK_MANAGER_LOGIN_RK,
+	COALESCE(lg0x.RISK_MANAGER_NM, lg1.RISK_MANAGER_NM, 'N/A')  AS RISK_MANAGER_NM
+FROM
+	VINTAGE_LOGIN_00 AS lg0
+		LEFT JOIN VINTAGE_LOGIN_0X lg0x
+				ON lg0.RISK_MANAGER_LOGIN_RK = lg0x.RISK_MANAGER_LOGIN_RK				
+		LEFT JOIN VINTAGE_LOGIN_01 lg1
+				ON  lg0.RISK_MANAGER_LOGIN_RK = lg1.RISK_MANAGER_LOGIN_RK
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);
+--------------------------------------------------------------
+
+
+
+ 
+/* **********************************************************************************************************
+СВОД ВЫДАННЫХ ДОГОВОРОВ --- а-ля Детализация данных по договорам 
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_AGR_FINAL;
+CREATE TABLE VINTAGE_AGR_FINAL AS
+( SELECT
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.AGREEMENT_RK,
+	dar.APPLICATION_RK, 					
+	dar.SOURCE_SYSTEM_CD,
+	dar.CONTRACT_ID,	
+	dar.CONTRACT_TYPE_CD,	
+	dar.GENERATION_DT,					-- Поколение выдачи(открытия кредитной линии)
+	dar.ISSUE_RUR_AMT,					-- Диапазон суммы выдачи кредита
+	dar.ISSUE_AMT,							-- Диапазон суммы выдачи кредита
+	dar.CURRENCY_ISO_CD,	
+	dar.PRODUCT_ACTUAL_CD,
+	dar.PRODUCT_ANALYTIC_CD,
+	dar.PRODUCT_NM,
+	dar.FIRST_PAYMENT_MONTH, 
+	
+--- добавить вычисления!!!	
+	dar.PRODUCT_OPERATIONAL_ID,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	CASE WHEN dar.RBP_FLG='1' THEN 'Y' ELSE 'N' END AS RBP_FLG,			-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	dar.GENERATION_BALANCE_DT,	-- Поколение реальной выдачи кредита 
+	CASE WHEN dar.BALANCE_FLG='1' THEN 'Y' ELSE 'N' END AS BALANCE_FLG,		-- Признак реальной выдачи кредита 
+
+-- BEGIN: Коммитет
+	COALESCE(prot.GSZ_LIMIT_GROUP_1_AMT,	app1.CONNECTED_LIAB_AMT, dar.ISSUE_AMT, 0) AS GSZ_LIMIT_AMT, -- лимит на ГСЗ
+	COALESCE(prot.GSZ_LIMIT_GROUP_1_AMT*fct.RATE, app1.CONNECTED_LIAB_AMT*fct.RATE, prot.GSZ_LIMIT_GROUP_1_AMT, app1.CONNECTED_LIAB_AMT, dar.ISSUE_RUR_AMT, 0) AS GSZ_LIMIT_RUR_AMT, -- лимит на ГСЗ
+	
+	
+	CASE WHEN app1.NULL_LIMIT_FLG = 'Y' OR (lim.CREDIT_LIMIT_AMT = 0 AND COALESCE(lim.LOAN_AMT,0) =0)
+			THEN 'N' 
+			ELSE 'Y'
+		END AS NULL_LIMIT_FLG,	-- Признак одобрения нулевого лимита по карте
+	COALESCE(app1.ASSBAA_NEGATIVE_COMMENT_CODE, 'N') AS NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	COALESCE(prot.DEAL_TYPE_CD, '01')  AS DEAL_TYPE_CD,
+-- END: Коммитет
+	
+-- BEGIN: РМ
+	COALESCE(comm2.RISK_MANAGER_LOGIN_RK, -1) AS RISK_MANAGER_LOGIN_RK,
+	COALESCE(comm2.RISK_MANAGER_NM, '') AS RISK_MANAGER_NM,
+-- END: PM	
+
+-- BEGIN: Лицо, принявшее решение по кредитному договору -- Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+	CAST( CASE WHEN COALESCE( UPPER(comm.SIGNATURE_LOGIN_ID), 'АВТО') IN ('АВТО', 'BIS') THEN 'АВТО' ELSE SIGNATURE_NM END AS VARCHAR(800)) AS SIGNATURE_NM,
+	COALESCE(comm.SIGNATURE_LOGIN_ID, 'АВТО') AS SIGNATURE_LOGIN_ID, -- Лицо, принявшее решение по кредитному договору 
+	COALESCE(comm.SIGNATURE_POS_NM, 'Автомат') AS SIGNATURE_POS_NM, -- Лицо, принявшее решение по кредитному договору 
+-- END: Лицо, принявшее решение по кредитному договору -- Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+
+-- BEGIN: TП
+	dar.MIGR_INIT_EXTRA_OFFICE_RK, -- ТП (базовый филиал) 
+	CAST(org.BRANCH_ID||'. '|| org.BRANCH_NM AS VARCHAR(200)) AS BRANCH_NM,
+	CAST(org.REGIONAL_OPER_OFFICE_ID ||'. '||org.REGIONAL_OPER_OFFICE_NM AS VARCHAR(200)) AS REGIONAL_OPER_OFFICE_NM,
+	CASE WHEN dar.CONTRACT_TYPE_CD   = 'РО' 
+			THEN 'Да'
+			ELSE  'Нет'
+		END AS RO_FLG,
+	CASE WHEN org.MOSCOW_REGION_CD = 'М'  OR org.MOSCOW_REGION_CD = 'О' OR org.REGIONAL_OPER_OFFICE_RK=2
+           THEN 'Москва и Мос.Обл.' 
+           ELSE  'Регион' 
+         END AS MOSCOW_REGION_CD,
+	org.REGIONAL_OPER_OFFICE_RK,
+	org.BRANCH_RK 
+-- END: TП	
+FROM
+	VINTAGE_AGREEMENT  AS dar
+	LEFT JOIN VINTAGE_PROT prot
+		ON(1=1
+				AND prot.APPLICATION_AGREEMENT_RK = dar.APPLICATION_RK 
+			)
+	LEFT JOIN VINTAGE_APP_1 app1 
+		ON( 1=1
+				AND app1.MIGR_ROOT_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+			)
+	LEFT JOIN VINTAGE_COMM_2 comm
+		ON( 1=1
+				AND comm.MIGR_ROOT_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+			)			
+	LEFT JOIN VINTAGE_LOGIN_02 comm2
+		ON( 1=1
+				AND comm2.MIGR_ROOT_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+			)			
+	LEFT JOIN CDM.CD_INTERNAL_ORG AS org
+		ON(	1=1
+				AND dar.MIGR_INIT_EXTRA_OFFICE_RK = org.EXTRA_OFFICE_RK
+				AND org.DELETED_FLG = '0'
+				AND CAST(CAST('?RDS_REPORT_DT' AS DATE) AS TIMESTAMP(0)) BETWEEN org.EFFECTIVE_FROM_DTTM AND org.EFFECTIVE_TO_DTTM
+            )
+	LEFT JOIN VINTAGE_AGREEMENT_LIM lim 
+		ON( 1=1
+				AND lim.MIGR_ROOT_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+			)
+	LEFT JOIN CDM.FCT_FX_RATE AS fct
+		ON(
+               fct.TRG_CURRENCY_ISO_CD = 'RUR'
+               AND fct.CALENDAR_DT = CAST('?RDS_REPORT_DT' AS DATE)
+               AND fct.DELETED_FLG = '0'
+               AND fct.SRC_CURRENCY_ISO_CD = dar.CURRENCY_ISO_CD
+            )			
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+/* **********************************************************************************************************
+
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_PORTFOLIO;
+CREATE TABLE VINTAGE_PORTFOLIO AS
+(SELECT
+	lpm.REPORT_DT AS BUSINESS_DT,
+	init.MIGR_ROOT_AGREEMENT_RK,
+	init.AGREEMENT_RK,
+	init.PRODUCT_ANALYTIC_CD,
+	init.GENERATION_DT,
+	lpm.DPD_FIFO_PRI_CNT,
+	lpm.DPD_LIFO_PRI_CNT,
+	lpm.DPD_MONTHMAX_LIFO_PRI_CNT,
+	lpm.DPD_MONTHMAX_FIFO_PRI_CNT,
+	lpm.MONTHMAX_FIFO_PRI_DT,
+	lpm.MONTHMAX_LIFO_PRI_DT
+FROM
+	VINTAGE_AGR_FINAL AS init
+	INNER JOIN CDM.AGG_LOAN_PORTFOLIO AS lpm
+		ON(	1=1
+				AND lpm.MIGR_ROOT_AGREEMENT_RK = init.MIGR_ROOT_AGREEMENT_RK
+				AND lpm.REPORT_DT BETWEEN DATE '2012-01-01' AND CAST('?RDS_REPORT_DT' AS DATE)
+				AND lpm.MONTHMAX_FIFO_PRI_DT IS NOT NULL 
+				AND lpm.MONTHMAX_LIFO_PRI_DT IS NOT NULL 
+			)
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_SET_01;
+CREATE TABLE VINTAGE_SET_01 AS
+(SELECT
+	outs.BUSINESS_DT,
+	outs.MIGR_ROOT_AGREEMENT_RK,
+	outs.AGREEMENT_RK,
+	outs.PRODUCT_ANALYTIC_CD,
+	outs.GENERATION_DT,
+	rng.RANGE_ORDER_ID,
+-----
+	CAST(outs.MONTHMAX_FIFO_PRI_DT AS DATE) AS MONTHMAX_DT,
+	outs.DPD_MONTHMAX_FIFO_PRI_CNT AS MONTHMAX_CNT,
+-----
+	CASE WHEN MONTHMAX_DT<'2013-01-01' AND rng.RANGE_BEGIN_DAYS_CNT = 0
+		THEN MONTHMAX_DT + rng.RANGE_BEGIN_DAYS_CNT - MONTHMAX_CNT+1
+		ELSE MONTHMAX_DT + rng.RANGE_BEGIN_DAYS_CNT - MONTHMAX_CNT 
+	END AS GL_DELQ_ORG_DT -- дата выхода на диапазон
+FROM
+	VINTAGE_PORTFOLIO AS outs 
+	INNER JOIN VINTAGE_RANGE AS rng 
+	ON outs.DPD_MONTHMAX_FIFO_PRI_CNT >= rng.RANGE_BEGIN_DAYS_CNT
+WHERE 1 = 1 
+	QUALIFY ROW_NUMBER() OVER (PARTITION BY outs.MIGR_ROOT_AGREEMENT_RK, rng.RANGE_ORDER_ID, outs.BUSINESS_DT ORDER BY MONTHMAX_CNT DESC, MONTHMAX_DT ) = 1
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK) 
+PARTITION BY RANGE_N (BUSINESS_DT BETWEEN DATE '2012-02-29' AND CAST('?RDS_REPORT_DT' AS DATE) EACH INTERVAL '1' MONTH );  
+----------------------------------------------------------------------------------------------------------------------------
+COLLECT STATISTICS COLUMN BUSINESS_DT, COLUMN MIGR_ROOT_AGREEMENT_RK, COLUMN (BUSINESS_DT,MIGR_ROOT_AGREEMENT_RK), 
+INDEX (BUSINESS_DT,MIGR_ROOT_AGREEMENT_RK) ON VINTAGE_SET_01;
+
+
+/* **********************************************************************************************************
+ NL - data
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_SET_NL_;
+CREATE VOLATILE TABLE VINTAGE_SET_NL_ AS
+(SELECT
+	dlq.BUSINESS_DT,
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.MONTHMAX_CNT,
+	dlq.MONTHMAX_DT,
+	dlq.GENERATION_DT,
+	dlq.RANGE_ORDER_ID--,
+	--SUM(CAST(COALESCE(flb.PRI_BALANCE_AMT * fct.RATE, flb.PRI_BALANCE_AMT, 0) as DECIMAL(23,5))) as NL_PRI_BALANCE_AMT,
+	--SUM(CAST(COALESCE(flb.OVERDUE_PRI_BALANCE_AMT * fct.RATE, flb.OVERDUE_PRI_BALANCE_AMT, 0) as DECIMAL(23,5))) as NL_OVERDUE_PRI_BALANCE_AMT
+FROM
+	(	SELECT
+			d.BUSINESS_DT,
+			d.MIGR_ROOT_AGREEMENT_RK,
+			d.AGREEMENT_RK,
+			d.PRODUCT_ANALYTIC_CD,
+			d.MONTHMAX_CNT,
+			d.MONTHMAX_DT,
+			d.GENERATION_DT,
+			MAX(d.RANGE_ORDER_ID) AS RANGE_ORDER_ID
+		FROM VINTAGE_SET_01 d
+		GROUP BY 
+			d.BUSINESS_DT,
+			d.MIGR_ROOT_AGREEMENT_RK,
+			d.AGREEMENT_RK,
+			d.PRODUCT_ANALYTIC_CD,
+			d.MONTHMAX_CNT,
+			d.MONTHMAX_DT,
+			d.GENERATION_DT
+	)	AS dlq
+	/*
+	LEFT JOIN CDM.FCT_LOAN_BALANCE AS flb
+		ON(
+				1=1
+				AND dlq.MIGR_ROOT_AGREEMENT_RK = flb.MIGR_ROOT_AGREEMENT_RK
+				AND flb.DELETED_FLG = '0'
+				AND CAST(dlq.MONTHMAX_DT  AS TIMESTAMP(0)) BETWEEN flb.EFFECTIVE_FROM_DTTM AND flb.EFFECTIVE_TO_DTTM
+				AND flb.PRI_BALANCE_AMT + flb.OVERDUE_PRI_BALANCE_AMT <> 0
+            )
+	LEFT JOIN CDM.FCT_FX_RATE AS fct
+		ON(
+               fct.TRG_CURRENCY_ISO_CD = 'RUR'
+               and fct.CALENDAR_DT = CAST('?RDS_REPORT_DT' AS DATE)
+               and fct.DELETED_FLG = '0'
+               and fct.SRC_CURRENCY_RK = flb.CURRENCY_RK
+            )
+	*/
+GROUP BY 
+	dlq.BUSINESS_DT,
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.MONTHMAX_CNT,
+	dlq.MONTHMAX_DT,
+	dlq.GENERATION_DT,
+	dlq.RANGE_ORDER_ID
+) WITH DATA PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK)
+PARTITION BY RANGE_N (BUSINESS_DT BETWEEN DATE '2012-02-29' AND CAST('?RDS_REPORT_DT' AS DATE) EACH INTERVAL '1' MONTH ) ON COMMIT PRESERVE ROWS;
+COLLECT STATISTICS COLUMN MONTHMAX_DT, COLUMN AGREEMENT_RK, 
+COLUMN (MONTHMAX_DT, AGREEMENT_RK), COLUMN (BUSINESS_DT, AGREEMENT_RK), COLUMN PARTITION ON VINTAGE_SET_NL_;
+  
+------------------------------------------закомменчено сверху и volatile table потому что ошибка unoptimized query.
+
+DROP TABLE VINTAGE_SET_NL;
+CREATE TABLE VINTAGE_SET_NL AS
+(SELECT
+	tmp.*,
+	SUM(CAST(COALESCE(flb.PRI_BALANCE_AMT * fct.RATE, flb.PRI_BALANCE_AMT, 0) AS DECIMAL(23,5))) AS NL_PRI_BALANCE_AMT,
+	SUM(CAST(COALESCE(flb.OVERDUE_PRI_BALANCE_AMT * fct.RATE, flb.OVERDUE_PRI_BALANCE_AMT, 0) AS DECIMAL(23,5))) AS NL_OVERDUE_PRI_BALANCE_AMT
+FROM
+	VINTAGE_SET_NL_ AS tmp
+	
+	LEFT JOIN CDM.FCT_LOAN_BALANCE AS flb
+		ON tmp.AGREEMENT_RK = flb.AGREEMENT_RK AND CAST(tmp.MONTHMAX_DT AS TIMESTAMP(0)) BETWEEN flb.EFFECTIVE_FROM_DTTM AND flb.EFFECTIVE_TO_DTTM
+			AND flb.PRI_BALANCE_AMT + flb.OVERDUE_PRI_BALANCE_AMT <> 0 AND flb.DELETED_FLG = '0'
+				--AND tmp.MIGR_ROOT_AGREEMENT_RK = flb.MIGR_ROOT_AGREEMENT_RK
+				
+	LEFT JOIN CDM.FCT_FX_RATE AS fct
+		ON fct.SRC_CURRENCY_RK = flb.CURRENCY_RK AND fct.CALENDAR_DT = CAST('?RDS_REPORT_DT' AS DATE) AND fct.TRG_CURRENCY_ISO_CD = 'RUR' AND fct.DELETED_FLG = '0' 
+	
+GROUP BY 
+	tmp.BUSINESS_DT,
+	tmp.MIGR_ROOT_AGREEMENT_RK,
+	tmp.AGREEMENT_RK,
+	tmp.PRODUCT_ANALYTIC_CD,
+	tmp.MONTHMAX_CNT,
+	tmp.MONTHMAX_DT,
+	tmp.GENERATION_DT,
+	tmp.RANGE_ORDER_ID
+) WITH DATA PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);  
+COLLECT STATISTICS COLUMN BUSINESS_DT, COLUMN MIGR_ROOT_AGREEMENT_RK, COLUMN (BUSINESS_DT,MIGR_ROOT_AGREEMENT_RK), COLUMN PARTITION ON VINTAGE_SET_NL;
+----------------------------------------------------------------------------------------------------------------------------
+
+
+/* **********************************************************************************************************
+Данные для GL
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_SET_02;
+CREATE TABLE VINTAGE_SET_02 AS
+(SELECT
+	dlq.BUSINESS_DT,
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.GENERATION_DT,
+	dlq.RANGE_ORDER_ID,
+	dlq.GL_DELQ_ORG_DT,
+	SUM(CAST(COALESCE(flb.PRI_BALANCE_AMT*fct.RATE, flb.PRI_BALANCE_AMT, 0) AS DECIMAL(23,5))) AS GL_PRI_BALANCE_AMT,
+	SUM(CAST(COALESCE(flb.OVERDUE_PRI_BALANCE_AMT *fct.RATE, flb.OVERDUE_PRI_BALANCE_AMT, 0)AS DECIMAL(23,5))) AS GL_OVERDUE_PRI_BALANCE_AMT
+FROM
+	VINTAGE_SET_01 AS dlq
+	LEFT JOIN CDM.FCT_LOAN_BALANCE AS flb
+		ON dlq.AGREEMENT_RK = flb.AGREEMENT_RK AND CAST(dlq.GL_DELQ_ORG_DT AS TIMESTAMP(0)) BETWEEN flb.EFFECTIVE_FROM_DTTM AND flb.EFFECTIVE_TO_DTTM
+          AND flb.PRI_BALANCE_AMT + flb.OVERDUE_PRI_BALANCE_AMT <> 0 AND flb.DELETED_FLG = '0'
+               --dlq.MIGR_ROOT_AGREEMENT_RK = flb.MIGR_ROOT_AGREEMENT_RK
+               
+	LEFT JOIN CDM.FCT_FX_RATE AS fct
+		ON fct.SRC_CURRENCY_RK = flb.CURRENCY_RK AND fct.CALENDAR_DT = CAST('?RDS_REPORT_DT' AS DATE) AND fct.TRG_CURRENCY_ISO_CD = 'RUR' AND fct.DELETED_FLG = '0'
+               
+GROUP BY 
+	dlq.BUSINESS_DT,
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.GENERATION_DT,
+	dlq.RANGE_ORDER_ID,
+	dlq.GL_DELQ_ORG_DT	
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);  
+COLLECT STATISTICS COLUMN BUSINESS_DT, COLUMN MIGR_ROOT_AGREEMENT_RK, COLUMN (BUSINESS_DT,MIGR_ROOT_AGREEMENT_RK), COLUMN PARTITION ON VINTAGE_SET_02;  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+GL  - data
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_SET_GL;
+CREATE TABLE VINTAGE_SET_GL AS
+(SELECT
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.GENERATION_DT,
+	dlq.RANGE_ORDER_ID,
+	dlq.GL_DELQ_ORG_DT,
+	dlq.GL_PRI_BALANCE_AMT,
+	dlq.GL_OVERDUE_PRI_BALANCE_AMT
+FROM
+	VINTAGE_SET_02 AS dlq
+WHERE 	
+	1 = 1 QUALIFY ROW_NUMBER() OVER (PARTITION BY dlq.RANGE_ORDER_ID, dlq.MIGR_ROOT_AGREEMENT_RK ORDER BY dlq.GL_DELQ_ORG_DT ) = 1	
+) WITH DATA
+PRIMARY INDEX (MIGR_ROOT_AGREEMENT_RK);  
+COLLECT STATISTICS COLUMN MIGR_ROOT_AGREEMENT_RK ON VINTAGE_SET_GL;  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+/* **********************************************************************************************************
+ПАТТЕРН по которому размазываем NL и GL
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_PATTERN;
+CREATE TABLE VINTAGE_PATTERN AS
+(SELECT
+ DISTINCT
+	b_dt.BUSINESS_DT,
+	CAST(MONTH_BEGIN(g_dt.BUSINESS_DT) AS DATE) AS GENERATION_DT,
+	rng.RANGE_ORDER_ID,
+	prod.PRODUCT_ANALYTIC_CD
+FROM
+	VINTAGE_DT AS b_dt,
+	VINTAGE_DT AS g_dt,
+	VINTAGE_RANGE  AS rng,
+	VINTAGE_PRODUCT AS prod
+
+WHERE b_dt.BUSINESS_DT- ADD_MONTHS(  MONTH_BEGIN(g_dt.BUSINESS_DT), prod.FIRST_PAYMENT_MONTH + CAST(rng.RANGE_BEGIN_DAYS_CNT /30 AS INTEGER)) >= 0	
+OR b_dt.BUSINESS_DT=g_dt.BUSINESS_DT
+) WITH DATA
+PRIMARY INDEX (	BUSINESS_DT, GENERATION_DT, RANGE_ORDER_ID, PRODUCT_ANALYTIC_CD);  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+/* **********************************************************************************************************
+РАСШИФРОВКА ШАГ_01 -- размазываем договора  
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_DETAIL_01;
+CREATE TABLE VINTAGE_DETAIL_01 AS
+(SELECT
+  	ptrn1.BUSINESS_DT,
+	ptrn1.GENERATION_DT,
+	ptrn1.PRODUCT_ANALYTIC_CD,
+
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.AGREEMENT_RK,
+	dar.APPLICATION_RK, 					
+	dar.SOURCE_SYSTEM_CD,
+	dar.CONTRACT_ID,	
+	dar.CONTRACT_TYPE_CD,	
+	dar.ISSUE_RUR_AMT,					-- Диапазон суммы выдачи кредита
+	dar.ISSUE_AMT,							-- Диапазон суммы выдачи кредита
+	dar.CURRENCY_ISO_CD,	
+	dar.PRODUCT_ACTUAL_CD,
+	dar.PRODUCT_NM,
+	dar.FIRST_PAYMENT_MONTH, 
+	dar.PRODUCT_OPERATIONAL_ID,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	dar.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	dar.GENERATION_BALANCE_DT,	-- Поколение реальной выдачи кредита 
+	dar.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+
+-- BEGIN: Коммитет
+	dar.GSZ_LIMIT_AMT, -- лимит на ГСЗ
+	dar.GSZ_LIMIT_RUR_AMT, -- лимит на ГСЗ
+	dar.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	dar.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	dar.DEAL_TYPE_CD, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+-- END: Коммитет
+	
+-- BEGIN: РМ
+	dar.RISK_MANAGER_LOGIN_RK,
+	dar.RISK_MANAGER_NM,
+-- END: PM	
+
+-- BEGIN: Лицо, принявшее решение по кредитному договору -- Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+	dar.SIGNATURE_NM,
+	dar.SIGNATURE_LOGIN_ID, -- Лицо, принявшее решение по кредитному договору 
+	dar.SIGNATURE_POS_NM,
+-- END: Лицо, принявшее решение по кредитному договору -- Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+
+-- BEGIN: TП
+	dar.MIGR_INIT_EXTRA_OFFICE_RK, -- ТП (базовый филиал) 
+	dar.BRANCH_NM,
+	dar.REGIONAL_OPER_OFFICE_NM,
+	dar.RO_FLG,
+	dar.MOSCOW_REGION_CD,
+	dar.REGIONAL_OPER_OFFICE_RK,
+	dar.BRANCH_RK 
+-- END: TП
+FROM 
+		(SELECT
+			DISTINCT 
+				ptrn.BUSINESS_DT,
+				ptrn.GENERATION_DT,
+				ptrn.PRODUCT_ANALYTIC_CD
+			FROM 
+				VINTAGE_PATTERN ptrn
+		) ptrn1
+	INNER JOIN VINTAGE_AGR_FINAL dar
+	ON( 1=1
+			AND ptrn1.GENERATION_DT = dar.GENERATION_DT
+			AND ptrn1.PRODUCT_ANALYTIC_CD = dar.PRODUCT_ANALYTIC_CD
+	)
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);  
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+/* **********************************************************************************************************
+
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_DETAIL_02;
+CREATE TABLE VINTAGE_DETAIL_02 AS
+(SELECT
+  	ptrn.BUSINESS_DT,
+	ptrn.GENERATION_DT,
+	ptrn.PRODUCT_ANALYTIC_CD,
+	gl.MIGR_ROOT_AGREEMENT_RK,
+	gl.AGREEMENT_RK, 
+	MIN(CASE WHEN gl.RANGE_ORDER_ID=1 THEN GL_DELQ_ORG_DT ELSE NULL END) AS GL_LVL1_DT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=1 THEN GL_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL1_PRI_BALANCE_AMT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=1 THEN GL_OVERDUE_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL1_OVERPRI_BALANCE_AMT,
+
+	MIN(CASE WHEN gl.RANGE_ORDER_ID=2 THEN GL_DELQ_ORG_DT ELSE NULL END) AS GL_LVL2_DT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=2 THEN GL_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL2_PRI_BALANCE_AMT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=2 THEN GL_OVERDUE_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL2_OVERPRI_BALANCE_AMT,
+	
+	MIN(CASE WHEN gl.RANGE_ORDER_ID=3 THEN GL_DELQ_ORG_DT ELSE NULL END) AS GL_LVL3_DT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=3 THEN GL_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL3_PRI_BALANCE_AMT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=3 THEN GL_OVERDUE_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL3_OVERPRI_BALANCE_AMT,
+	
+	MIN(CASE WHEN gl.RANGE_ORDER_ID=4 THEN GL_DELQ_ORG_DT ELSE NULL END) AS GL_LVL4_DT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=4 THEN GL_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL4_PRI_BALANCE_AMT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=4 THEN GL_OVERDUE_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL4_OVERPRI_BALANCE_AMT,
+	
+	MIN(CASE WHEN gl.RANGE_ORDER_ID=5 THEN GL_DELQ_ORG_DT ELSE NULL END) AS GL_LVL5_DT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=5 THEN GL_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL5_PRI_BALANCE_AMT,
+	SUM(CASE WHEN gl.RANGE_ORDER_ID=5 THEN GL_OVERDUE_PRI_BALANCE_AMT ELSE 0 END) AS GL_LVL5_OVERPRI_BALANCE_AMT
+FROM VINTAGE_PATTERN ptrn
+	INNER JOIN VINTAGE_SET_GL gl
+	ON( 1=1
+			AND ptrn.BUSINESS_DT >= MONTH_END(gl.GL_DELQ_ORG_DT) 
+			AND ptrn.GENERATION_DT = gl.GENERATION_DT
+			AND ptrn.RANGE_ORDER_ID = gl.RANGE_ORDER_ID
+			AND ptrn.PRODUCT_ANALYTIC_CD = gl.PRODUCT_ANALYTIC_CD
+	)
+GROUP BY 
+	ptrn.BUSINESS_DT,
+	ptrn.GENERATION_DT,
+	ptrn.PRODUCT_ANALYTIC_CD,
+	gl.MIGR_ROOT_AGREEMENT_RK,
+	gl.AGREEMENT_RK
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+/* **********************************************************************************************************
+
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_DETAIL_03;
+CREATE TABLE VINTAGE_DETAIL_03 AS
+(SELECT
+  	dlq.BUSINESS_DT,
+	dlq.GENERATION_DT,
+	dlq.PRODUCT_ANALYTIC_CD,
+	dlq.MIGR_ROOT_AGREEMENT_RK,
+	dlq.AGREEMENT_RK, 
+	
+	nl.MONTHMAX_CNT,
+	nl.MONTHMAX_DT,
+	nl.RANGE_ORDER_ID AS MONTH_RANGE_ID ,
+	nl.NL_PRI_BALANCE_AMT,
+	nl.NL_OVERDUE_PRI_BALANCE_AMT,
+	
+	dlq.GL_LVL1_DT,
+	dlq.GL_LVL1_PRI_BALANCE_AMT,
+	dlq.GL_LVL1_OVERPRI_BALANCE_AMT,
+
+	dlq.GL_LVL2_DT,
+	dlq.GL_LVL2_PRI_BALANCE_AMT,
+	dlq.GL_LVL2_OVERPRI_BALANCE_AMT,
+	
+	dlq.GL_LVL3_DT,
+	dlq.GL_LVL3_PRI_BALANCE_AMT,
+	dlq.GL_LVL3_OVERPRI_BALANCE_AMT,
+	
+	dlq.GL_LVL4_DT,
+	dlq.GL_LVL4_PRI_BALANCE_AMT,
+	dlq.GL_LVL4_OVERPRI_BALANCE_AMT,
+	
+	dlq.GL_LVL5_DT,
+	dlq.GL_LVL5_PRI_BALANCE_AMT,
+	dlq.GL_LVL5_OVERPRI_BALANCE_AMT
+FROM VINTAGE_DETAIL_02 dlq
+	LEFT JOIN  VINTAGE_SET_NL nl
+	ON( 1=1
+			AND dlq.BUSINESS_DT = nl.BUSINESS_DT 
+			AND dlq.MIGR_ROOT_AGREEMENT_RK = nl.MIGR_ROOT_AGREEMENT_RK
+	)
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+/* **********************************************************************************************************
+Какие-то конченые таблицы с оборотами за полгода что ли хуй пойми что, надо разобраться потом и удалить все лишнее
+* ********************************************************************************************************* */
+
+DROP TABLE tmp_acct;
+CREATE TABLE tmp_acct AS (
+SELECT 
+c.agreement_rk, rch.application_agreement_rk AS application_rk, 
+c.customer_rk, cu.customer_global_id, a.decision_dt, acc.account_id, acc.account_rk
+
+FROM
+
+(SELECT
+DISTINCT
+c.agreement_rk,
+c.customer_rk,
+COALESCE(c.migration_open_dt, c.issue_dt) AS issue_dt,
+c.contract_type_cd,
+c.customer_type_cd
+FROM dds.contract_ln c
+WHERE
+c.contract_type_cd = 'КРЕДИТ'
+AND c.contract_status_cd NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ', 'ВВРД')
+AND c.product_operational_id IN ('МН', 'ПМ', 'ПЭ', 'ПЯ') 
+AND c.tranche_num IS NULL
+AND c.deleted_flg = '0'
+) c
+
+LEFT JOIN dds.agreement_relationship_hist rch
+ON rch.agreement_rk = c.agreement_rk
+AND rch.application_app_prt_type_cd = 'ЗАЯВКИ'
+AND rch.agreement_type_cd = 'КРЕДИТ'
+AND rch.deleted_flg = '0'
+AND CURRENT_DATE BETWEEN rch.effective_from_dttm AND rch.effective_to_dttm 
+
+LEFT JOIN dds.customer_global_registry cu
+ON cu.customer_rk = c.customer_rk
+AND cu.customer_type_cd = c.customer_type_cd
+AND cu.deleted_flg = '0'
+AND CURRENT_DATE BETWEEN cu.effective_from_dttm AND cu.effective_to_dttm
+
+LEFT JOIN application a
+ON a.agreement_rk = c.agreement_rk
+AND a.agreement_type_cd = c.contract_type_cd
+
+JOIN dds.account_bis_hist acc
+ON acc.customer_rk = c.customer_rk
+AND acc.open_dt <= a.decision_dt
+AND acc.close_dt > ADD_MONTHS(a.decision_dt, -7)
+AND acc.gl_account_num IN ('40502', '40503', '40602', '40603','40702', '40703', '40802', '40817')
+AND CURRENT_DATE BETWEEN acc.effective_from_dttm AND acc.effective_to_dttm
+AND acc.deleted_flg = '0'
+
+WHERE 
+c.issue_dt BETWEEN DATE '2013-01-01' AND DATE '2013-12-31'
+) WITH DATA;
+
+DROP TABLE tmp_turn1;
+CREATE TABLE tmp_turn1 AS
+(SELECT
+a.agreement_rk, a.customer_rk, a.decision_dt,
+CASE 
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -1) THEN '1'
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -2) THEN '2'
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -3) THEN '3'
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -4) THEN '4'
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -5) THEN '5'
+WHEN e.entry_dt >= ADD_MONTHS(decision_dt - 3, -6) THEN '6'
+ELSE '>6'
+END AS mo,
+SUM(credit_entry_amt_nc) AS amt
+
+FROM tmp_acct a
+JOIN dds.account_entry e
+ON e.credit_account_rk = a.account_rk
+AND e.entry_type_cd IN ('000000', '005000', '100000', '200000', '400000', '500000', '600000', '700000', '800000', '900000', 'D00001')
+AND e.src_deleted IS NULL
+AND e.entry_dt < (a.decision_dt - 3)
+AND e.entry_dt >= ADD_MONTHS(a.decision_dt - 3, -6)
+GROUP BY a.agreement_rk, a.customer_rk, a.decision_dt, mo
+) WITH DATA;
+
+/* **********************************************************************************************************
+Конец конченых таблиц
+* ********************************************************************************************************* */
+
+
+/* **********************************************************************************************************
+ПОлная детализация по договорам по состоянию на заданную отчтеную дату 
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_DETAIL_FINAL;
+CREATE TABLE VINTAGE_DETAIL_FINAL AS
+(SELECT
+	CAST('?RDS_REPORT_DT' AS DATE) REPORT_DT,
+  	dar.BUSINESS_DT,
+	dar.GENERATION_DT,-- Поколение
+	CAST((dar.BUSINESS_DT - dar.GENERATION_DT MONTH(4)) AS INTEGER) AS AGE, ---Возраст поколения
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.AGREEMENT_RK, 
+	dar.APPLICATION_RK, 					
+	dar.SOURCE_SYSTEM_CD,
+	dar.CONTRACT_ID,	
+	dar.CONTRACT_TYPE_CD,	
+	dar.RO_FLG,	
+	dar.ISSUE_RUR_AMT,
+	dar.ISSUE_AMT,
+	dar.CURRENCY_ISO_CD,		
+	pl.pl_flg,
+	--uw.UW_FLAG,
+	acc.turn_flg,
+	
+	CAST(CASE WHEN ISSUE_RUR_AMT <= 100000 
+						THEN '01. до  100 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 100000 AND ISSUE_RUR_AMT <= 200000
+						THEN '02. от  100 001  до  200 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 200000 AND ISSUE_RUR_AMT <= 300000
+						THEN '03. от  200 001  до  300 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 300000 AND ISSUE_RUR_AMT <= 500000
+						THEN '04. от  300 001  до  500 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 500000 AND ISSUE_RUR_AMT <= 750000
+						THEN '05. от  500 001  до  750 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 750000 AND ISSUE_RUR_AMT <= 1000000
+						THEN '06. от  750 001  до  1 000 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 1000000 AND ISSUE_RUR_AMT <= 2000000
+						THEN '07. от  1 000 001  до  2 000 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 2000000 AND ISSUE_RUR_AMT <= 3000000
+						THEN '08. от  2 000 001  до  3 000 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 3000000 AND ISSUE_RUR_AMT <= 5000000
+						THEN '09. от  3 000 001  до  5 000 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 5000000 AND ISSUE_RUR_AMT <= 8000000
+						THEN '10. от  5 000 001  до  8 000 000 руб.'
+					WHEN 	ISSUE_RUR_AMT > 8000000 AND ISSUE_RUR_AMT <= 10000000
+						THEN '11. от  8 000 001  до  10 000 000 руб.'
+					ELSE '12.  более  10 000 000 руб.' 
+				END  AS VARCHAR(50)) AS ISSUE_DESC, -- лимит на ГСЗ
+
+	dar.GSZ_LIMIT_AMT, -- лимит на ГСЗ			
+	dar.GSZ_LIMIT_RUR_AMT,
+	CAST(CASE WHEN GSZ_LIMIT_RUR_AMT <= 100000 
+						THEN '01. до  100 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 100000 AND GSZ_LIMIT_RUR_AMT <= 200000
+						THEN '02. от  100 001  до  200 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 200000 AND GSZ_LIMIT_RUR_AMT <= 300000
+						THEN '03. от  200 001  до  300 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 300000 AND GSZ_LIMIT_RUR_AMT <= 500000
+						THEN '04. от  300 001  до  500 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 500000 AND GSZ_LIMIT_RUR_AMT <= 750000
+						THEN '05. от  500 001  до  750 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 750000 AND GSZ_LIMIT_RUR_AMT <= 1000000
+						THEN '06. от  750 001  до  1 000 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 1000000 AND GSZ_LIMIT_RUR_AMT <= 2000000
+						THEN '07. от  1 000 001  до  2 000 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 2000000 AND GSZ_LIMIT_RUR_AMT <= 3000000
+						THEN '08. от  2 000 001  до  3 000 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 3000000 AND GSZ_LIMIT_RUR_AMT <= 5000000
+						THEN '09. от  3 000 001  до  5 000 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 5000000 AND GSZ_LIMIT_RUR_AMT <= 8000000
+						THEN '10. от  5 000 001  до  8 000 000 руб.'
+					WHEN 	GSZ_LIMIT_RUR_AMT > 8000000 AND GSZ_LIMIT_RUR_AMT <= 10000000
+						THEN '11. от  8 000 001  до  10 000 000 руб.'
+					ELSE '12.  более  10 000 000 руб.' 
+				END  AS VARCHAR(50)) AS GSZ_LIMIT_DESC, -- лимит на ГСЗ
+				
+	dar.GENERATION_BALANCE_DT,	-- Поколение реальной выдачи кредита 
+	dar.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	
+	dar.PRODUCT_ACTUAL_CD,	
+	dar.PRODUCT_ANALYTIC_CD,
+	dar.PRODUCT_NM,
+	dar.FIRST_PAYMENT_MONTH, 
+	dar.PRODUCT_OPERATIONAL_ID,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	dar.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	
+	dar.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	dar.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	dar.DEAL_TYPE_CD,
+	dl.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	dar.RISK_MANAGER_LOGIN_RK,
+	dar.RISK_MANAGER_NM,
+
+-- BEGIN: Лицо, принявшее решение по кредитному договору -- Лицо (автомат, РМ, кред. аналитик), подписавшее последний протокол со статусом "Принят"
+	dar.SIGNATURE_NM,
+	dar.SIGNATURE_LOGIN_ID, -- Лицо, принявшее решение по кредитному договору 
+	dar.SIGNATURE_POS_NM,
+
+-- BEGIN: TП
+	dar.BRANCH_NM,
+	dar.REGIONAL_OPER_OFFICE_NM,
+	dar.MOSCOW_REGION_CD,
+	dar.BRANCH_RK,
+	dar.REGIONAL_OPER_OFFICE_RK,
+	dar.MIGR_INIT_EXTRA_OFFICE_RK, -- ТП (базовый филиал) 
+
+	dlq.MONTHMAX_CNT,
+	dlq.MONTHMAX_DT,
+	dlq.MONTH_RANGE_ID,
+	rng.DELINQUENCY_RANGE_NM AS MONTH_LVL_NM,
+--- NL
+	COALESCE(dlq.NL_PRI_BALANCE_AMT, 0) AS NL_PRI_BALANCE_AMT,
+	COALESCE(dlq.NL_OVERDUE_PRI_BALANCE_AMT, 0) AS NL_OVERDUE_PRI_BALANCE_AMT,
+--- GL 0+
+	dlq.GL_LVL1_DT,
+	COALESCE(dlq.GL_LVL1_PRI_BALANCE_AMT, 0) AS GL_LVL1_PRI_BALANCE_AMT,
+	COALESCE(dlq.GL_LVL1_OVERPRI_BALANCE_AMT, 0) AS GL_LVL1_OVERPRI_BALANCE_AMT,
+--- GL 7+
+	dlq.GL_LVL2_DT,
+	COALESCE(dlq.GL_LVL2_PRI_BALANCE_AMT, 0) AS GL_LVL2_PRI_BALANCE_AMT,
+	COALESCE(dlq.GL_LVL2_OVERPRI_BALANCE_AMT, 0) AS GL_LVL2_OVERPRI_BALANCE_AMT,
+--- GL 30+	
+	dlq.GL_LVL3_DT,
+	COALESCE(dlq.GL_LVL3_PRI_BALANCE_AMT, 0) AS GL_LVL3_PRI_BALANCE_AMT,
+	COALESCE(dlq.GL_LVL3_OVERPRI_BALANCE_AMT, 0)AS GL_LVL3_OVERPRI_BALANCE_AMT,
+--- GL 60+		
+	dlq.GL_LVL4_DT,
+	COALESCE(dlq.GL_LVL4_PRI_BALANCE_AMT, 0) AS GL_LVL4_PRI_BALANCE_AMT,
+	COALESCE(dlq.GL_LVL4_OVERPRI_BALANCE_AMT, 0) AS GL_LVL4_OVERPRI_BALANCE_AMT,
+--- GL 90+	
+	dlq.GL_LVL5_DT,
+	COALESCE(dlq.GL_LVL5_PRI_BALANCE_AMT, 0)AS GL_LVL5_PRI_BALANCE_AMT,
+	COALESCE(dlq.GL_LVL5_OVERPRI_BALANCE_AMT, 0) AS GL_LVL5_OVERPRI_BALANCE_AMT
+FROM VINTAGE_DETAIL_01 dar
+	LEFT JOIN  VINTAGE_DETAIL_03 dlq
+	ON( 1=1
+			AND dlq.BUSINESS_DT = dar.BUSINESS_DT 
+			AND dlq.MIGR_ROOT_AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
+	)
+	LEFT JOIN  VINTAGE_RANGE rng
+	ON(1=1
+			AND rng.RANGE_ORDER_ID  = dlq.MONTH_RANGE_ID
+		)
+	LEFT JOIN /*PROD_V_DDS*/ DDS.DIM_DEAL_TYPE dl
+		ON ( 1=1
+			AND dar.DEAL_TYPE_CD = dl.DEAL_TYPE_CD 
+			AND dl.EFFECTIVE_TO_DTTM = '5999-12-31 00:00:00' --&MAX_DTTM
+			AND dl.DELETED_FLG = '0'
+		)
+	LEFT JOIN
+		(SELECT 
+		agreement_rk,
+		CASE WHEN SUM(CASE WHEN src_nn IS NOT NULL THEN pl_cnt ELSE 0 END) >0 THEN CAST('Залог' AS VARCHAR(10) ) ELSE CAST('Без залога' AS VARCHAR(10) ) END AS pl_flg
+			FROM  
+				(SELECT
+				t.agreement_rk,
+				p.src_nn, --Порядковый номер залога
+				CASE 
+				WHEN collateral_type_cd IN ('3.4.1', '3.4.2', '3.4.3', '3.4.4', '3.4.5', '3.1.1', '3.1.1.1','3.1.1.10','3.1.1.11',
+				'3.1.1.17','3.1.1.2','3.1.1.33','3.1.1.4','3.1.1.56','3.1.1.57','3.1.1.58','3.1.1.59','3.1.1.60','3.1.1.61', 
+				'3.1.3','3.1.4','3.6.1','3.6.10','3.6.10.1','3.6.11.1','3.6.11.2','3.6.11.4','3.6.12.1','3.6.12.2',
+				'3.6.12.3','3.6.12.4','3.6.13.1','3.6.13.2','3.6.2','3.6.2.1','3.6.3','3.6.3.1','3.6.4','3.6.4.1','3.6.4.2','3.6.4.3','3.6.4.4',
+				'3.6.5','3.6.5.1','3.6.5.2','3.6.6','3.6.6.1','3.6.6.2','3.6.7','3.6.7.1','3.6.7.2','3.6.8','3.6.8.1','3.6.9','3.6.9.1','3.6.9.2',
+				'3.6.9.3','3.7.1','3.7.10','3.7.11','3.7.2','3.7.4','3.7.5','3.7.6','3.7.7','3.7.8','3.7.9','3.8.1','3.8.10','3.8.11','3.8.2',
+				'3.8.4','3.8.5','3.9.6','3.5.1','3.5.2','3.5.3','3.5.4','3.5.5','3.5.6','3.5.7','3.5.9','3.4.6','3.4.7','3.7.3','3','3.2.1','3.2.10','3.2.11','3.2.2',
+				'3.2.3','3.2.4','3.2.5','3.2.6','3.2.7','3.2.8','3.2.9','3.3.1','3.3.2','3.3.3','3.3.4','3.3.5','3.3.6','3.3.7','3.3.8','3.5.8','3.9.1','3.9.2','3.9.4',
+				'3.0.1','3.0.10','3.0.2','3.0.3','3.0.4','3.1.0.01','3.1.0.02') THEN 1 ELSE 0
+				END pl_cnt--тип залога
+					FROM 
+					(SELECT DISTINCT agreement_rk, source_system_cd
+					FROM dds.contract_ln
+					WHERE contract_type_cd = 'КРЕДИТ'
+					AND contract_status_cd NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ')
+					AND product_operational_id IN ('МН', 'ПМ', 'ПШ', 'ПЭ', 'ПЯ') 
+					AND tranche_num IS NULL
+					AND deleted_flg = '0'
+					) t
+					LEFT JOIN dds.agreement_pledge_hist p 
+					ON  t.agreement_rk=p.agreement_rk AND t.source_system_cd=p.source_system_cd AND p.deleted_flg=0 AND p.is_active_flg=1
+				) p
+				GROUP BY agreement_rk
+		) pl
+		ON dar.MIGR_ROOT_AGREEMENT_RK = pl.agreement_rk	
+	/*
+	LEFT JOIN
+		(SELECT DISTINCT 
+		    rch.agreement_rk,rch.agreement_type_cd,
+          t1.LOGIN_ID, t2.EMPLOYEE_SHORT_NM, CASE WHEN t1.LOGIN_ID LIKE 'R0000%' THEN 'UW' ELSE 'AUTO' END AS UW_FLAG
+		FROM DDS.APP_PRT_STAGE_HIST t1
+		LEFT JOIN 
+			(SELECT DISTINCT LOGIN_ID, EMPLOYEE_SHORT_NM
+				FROM DDS.LOGIN 
+				WHERE IS_ACTIVE_FLG = '1' AND EMPLOYEE_SHORT_NM IS NOT NULL) t2
+			ON t1.LOGIN_ID = t2.LOGIN_ID
+		INNER JOIN dds.agreement_relationship_hist rch
+			ON 	rch.application_agreement_rk = t1.agreement_rk
+			AND rch.application_app_prt_type_cd = 'ЗАЯВКИ'
+			AND rch.agreement_type_cd = 'КРЕДИТ'
+			AND rch.deleted_flg = '0'
+			AND CURRENT_DATE BETWEEN rch.effective_from_dttm AND rch.effective_to_dttm
+		WHERE t1.APPLICATION_SUBSTATUS_CD LIKE '%АНДЕРРАЙТИНГ' AND t1.APP_PRT_ID LIKE '721/%'	
+		) uw
+		ON dar.MIGR_ROOT_AGREEMENT_RK = uw.agreement_rk 	*/
+	LEFT JOIN
+		(SELECT agreement_rk, MAX(turn_flg) AS turn_flg
+		FROM
+			(SELECT
+			agreement_rk, CAST(SUM(CASE WHEN amt < 1000000 THEN 0 ELSE 1 END)/6 AS INTEGER) AS turn_flg
+			FROM tmp_turn1 GROUP BY 1) acc
+		GROUP BY 1
+		) acc
+	ON dar.MIGR_ROOT_AGREEMENT_RK = acc.agreement_rk 	
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, MIGR_ROOT_AGREEMENT_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+------------------------------------------------------------------------------------------------------------------------
+--JOB--JOB--JOB--JOB--------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+/* **********************************************************************************************************
+ВЫДАЧИ СВОД построенные на детализованной витрине
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_ADVANCES;
+CREATE TABLE VINTAGE_ADVANCES AS
+(SELECT
+	CAST('?RDS_REPORT_DT' AS DATE) REPORT_DT,
+	GENERATION_DT, 
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.AGREEMENT_RK,
+	dar.APPLICATION_RK, 					
+	dar.CONTRACT_ID,	
+	COUNT(MIGR_ROOT_AGREEMENT_RK) AS ISSUE_CNT,
+	SUM(dar.ISSUE_RUR_AMT) AS ISSUE_RUR_AMT,
+	SUM(dar.ISSUE_AMT) AS ISSUE_AMT,
+	dar.pl_flg, 
+	dar.turn_flg,
+	ISSUE_DESC,
+	GSZ_LIMIT_DESC, 
+	dar.PRODUCT_ANALYTIC_CD,
+	dar.PRODUCT_NM,
+	dar.RBP_FLG,	
+	dar.BALANCE_FLG,
+	dar.NULL_LIMIT_FLG,	
+	dar.NEGATIVE_COMMENT_FLG,	
+	dar.DEAL_TYPE_CD,
+	dar.DEAL_TYPE_DESC,
+	dar.RISK_MANAGER_NM,
+	dar.BRANCH_NM,
+	dar.BRANCH_RK
+
+FROM VINTAGE_DETAIL_FINAL dar
+WHERE REPORT_DT = CAST('?RDS_REPORT_DT' AS DATE) 
+	AND REPORT_DT=BUSINESS_DT
+GROUP BY 		
+	REPORT_DT, GENERATION_DT, 
+	dar.MIGR_ROOT_AGREEMENT_RK,
+	dar.AGREEMENT_RK,
+	dar.APPLICATION_RK, 					
+	dar.CONTRACT_ID,	
+	dar.pl_flg, 
+	dar.turn_flg,
+	ISSUE_DESC,
+	GSZ_LIMIT_DESC, 
+	dar.PRODUCT_ANALYTIC_CD,
+	dar.PRODUCT_NM,
+	dar.RBP_FLG,	
+	dar.BALANCE_FLG,
+	dar.NULL_LIMIT_FLG,	
+	dar.NEGATIVE_COMMENT_FLG,	
+	dar.DEAL_TYPE_CD,
+	dar.DEAL_TYPE_DESC,
+	dar.RISK_MANAGER_NM,
+	dar.BRANCH_NM,
+	dar.BRANCH_RK
+) WITH DATA
+PRIMARY INDEX (GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+/*
+АВТО 
+PRODUCT_ANALYTIC_CD in (2,9)
+095.002.Автокредитование Стандарт
+095.009.Автокредитование Лайт
+
+ИПОТЕКА
+PRODUCT_ANALYTIC_CD in (3,7,89,300,316)
+095.003.Ипотека
+095.007.Ипотека КИТ Финанс
+095.089.Ипотека. Социальная
+095.300.Ипотека. Для военных
+095.316.Ипотека. Победа над формальностями
+
+КАРТЫ
+PRODUCT_ANALYTIC_CD in (85,86,87,88,117,217)
+095.085. Кредитные карты Gold
+095.086. Кредитные карты Classic
+095.087. Кредитные карты Platinum
+095.088. Кредитные карты Infinite
+095.117. Кредитные карты Пакета Привилегия
+095.217. Кредитные карты Пакета Приоритет
+
+ПОТРЕБЫ
+PRODUCT_ANALYTIC_CD in (52,84,224)
+095. 052. Потребительские кредиты: Корпоративный канал (не зарплатные)
+095. 084. Потребительские кредиты: Открытый рынок
+095. 224. Потребительские кредиты: Рефинансирование
+
+
+SEL
+	GENERATION_DT,-- Поколение
+	SUM(ISSUE_CNT) as ISSUE_CNT,
+	SUM(ISSUE_RUR_AMT) as ISSUE_RUR_AMT,
+	PRODUCT_ANALYTIC_CD,
+	PRODUCT_NM
+FROM VINTAGE_ADVANCES
+GROUP BY 
+	GENERATION_DT,-- Поколение
+	PRODUCT_ANALYTIC_CD,
+	PRODUCT_NM
+
+
+SEL
+	GENERATION_DT,-- Поколение
+	SUM(ISSUES) as ISSUE_CNT,
+	SUM(ADVANCES) as ISSUE_RUR_AMT,
+	PRODUCT_NM
+FROM PROD_V_REP.REP238_ADVANCES
+WHERE REPORT_DT=CAST('2014-09-30' AS DATE)
+GROUP BY 
+	GENERATION_DT,-- Поколение
+	PRODUCT_NM
+*/
+
+
+------------------------------------------------------------------------------------------------------------------------
+--JOB--JOB--JOB--JOB--------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+/* **********************************************************************************************************
+GL --- размазываем
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_GL_P01;
+CREATE TABLE VINTAGE_GL_P01 AS
+(SELECT
+	p.BUSINESS_DT,
+	p.GENERATION_DT,
+	p.RANGE_ORDER_ID,
+	p.PRODUCT_ANALYTIC_CD,
+	gl.GL_PRI_BALANCE_AMT + gl.GL_OVERDUE_PRI_BALANCE_AMT AS OUTSTANDING_RUR_AMT,
+	gl.MIGR_ROOT_AGREEMENT_RK,
+	gl.AGREEMENT_RK
+FROM 
+	VINTAGE_PATTERN AS p
+		LEFT JOIN VINTAGE_SET_GL AS gl
+	ON(	1=1
+				AND p.BUSINESS_DT >= MONTH_END(gl.GL_DELQ_ORG_DT) 
+				AND p.GENERATION_DT = gl.GENERATION_DT
+				AND p.RANGE_ORDER_ID = gl.RANGE_ORDER_ID
+				AND p.PRODUCT_ANALYTIC_CD = gl.PRODUCT_ANALYTIC_CD
+		)
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, RANGE_ORDER_ID, MIGR_ROOT_AGREEMENT_RK);		
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+/* **********************************************************************************************************
+GL --- получаем GL просрочки с атрибутами
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_GL_P02;
+CREATE TABLE VINTAGE_GL_P02 AS
+(SELECT
+	CAST('Gross Losses' AS VARCHAR(20)) AS PERFORMANCE,
+	gl.RANGE_ORDER_ID,
+	COUNT(det.MIGR_ROOT_AGREEMENT_RK) AS OUTSTANDING_CNT,
+	SUM(gl.OUTSTANDING_RUR_AMT) AS OUTSTANDING_RUR_AMT,
+
+	det.REPORT_DT,
+  	det.BUSINESS_DT,
+	det.GENERATION_DT,-- Поколение
+	det.AGE, ---Возраст поколения
+	det.CURRENCY_ISO_CD,		
+	det.pl_flg,
+--	det.UW_FLAG,
+	det.turn_flg,
+	det.ISSUE_DESC, -- лимит на ГСЗ
+	det.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	det.PRODUCT_ANALYTIC_CD,
+	det.PRODUCT_NM,
+	det.FIRST_PAYMENT_MONTH, 
+	
+	det.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	det.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+
+	
+	det.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	det.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	det.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+
+-- BEGIN: РМ
+	det.RISK_MANAGER_LOGIN_RK,
+	det.RISK_MANAGER_NM,
+
+-- BEGIN: TП
+	det.BRANCH_NM,
+	det.BRANCH_RK
+FROM 	
+	VINTAGE_DETAIL_FINAL det
+	INNER JOIN VINTAGE_GL_P01 AS gl
+		ON(	1=1
+				AND det.BUSINESS_DT = gl.BUSINESS_DT
+				AND det.MIGR_ROOT_AGREEMENT_RK = gl.MIGR_ROOT_AGREEMENT_RK
+		)
+GROUP BY 
+	gl.RANGE_ORDER_ID,
+	det.REPORT_DT,
+  	det.BUSINESS_DT,
+	det.GENERATION_DT,-- Поколение
+	det.AGE, ---Возраст поколения
+	det.CURRENCY_ISO_CD,		
+	det.pl_flg,
+--	det.UW_FLAG,
+	det.turn_flg,
+	det.ISSUE_DESC, -- лимит на ГСЗ
+	det.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	det.PRODUCT_ANALYTIC_CD,
+	det.PRODUCT_NM,
+	det.FIRST_PAYMENT_MONTH, 
+	det.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	CASE WHEN det.PRODUCT_OPERATIONAL_ID= 'ПЕ' THEN 'Y' ELSE 'N' END,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	det.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+
+	det.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	det.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	det.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	det.RISK_MANAGER_LOGIN_RK,
+	det.RISK_MANAGER_NM,
+	
+-- BEGIN: TП
+	det.BRANCH_NM,
+	det.BRANCH_RK
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+/* **********************************************************************************************************
+GL --- привзяываем к ним диапазоны
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_GL_P03;
+CREATE TABLE VINTAGE_GL_P03 AS
+(SELECT
+	det.PERFORMANCE,
+	det.RANGE_ORDER_ID,
+	rng.DELINQUENCY_RANGE_NM,
+	det.OUTSTANDING_CNT,
+	det.OUTSTANDING_RUR_AMT,
+
+	det.REPORT_DT,
+  	det.BUSINESS_DT,
+	det.GENERATION_DT,-- Поколение
+	det.AGE, ---Возраст поколения
+	det.CURRENCY_ISO_CD,		
+	det.pl_flg, 
+--	det.UW_FLAG,
+	det.turn_flg,
+	det.ISSUE_DESC, -- лимит на ГСЗ
+	det.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	det.PRODUCT_ANALYTIC_CD,
+	det.PRODUCT_NM,
+	det.FIRST_PAYMENT_MONTH, 
+	
+	det.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	det.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	
+	det.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	det.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	det.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	det.RISK_MANAGER_LOGIN_RK,
+	det.RISK_MANAGER_NM,
+
+	
+
+
+-- BEGIN: TП
+	det.BRANCH_NM,
+	det.BRANCH_RK
+FROM 	
+	VINTAGE_GL_P02 det
+	LEFT JOIN VINTAGE_RANGE AS rng
+		ON(	1=1
+				AND rng.RANGE_ORDER_ID = det.RANGE_ORDER_ID
+		)
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+-----------------------------------------------------------------------------------------------------------------------
+--JOB--JOB--JOB--JOB--------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+/* **********************************************************************************************************
+NL
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_NL_P01;
+CREATE TABLE VINTAGE_NL_P01 AS
+(SELECT 
+	CAST('Net Losses' AS VARCHAR(20)) AS PERFORMANCE,
+	rng.RANGE_ORDER_ID,
+	rng.DELINQUENCY_RANGE_NM,
+	COUNT(det.MIGR_ROOT_AGREEMENT_RK) AS OUTSTANDING_CNT,
+	SUM(det.NL_PRI_BALANCE_AMT + det.NL_OVERDUE_PRI_BALANCE_AMT) AS OUTSTANDING_RUR_AMT,
+	det.REPORT_DT,
+  	det.BUSINESS_DT,
+	det.GENERATION_DT,-- Поколение
+	det.AGE, ---Возраст поколения
+	det.CURRENCY_ISO_CD,		
+	det.pl_flg,
+--	det.UW_FLAG,
+	det.turn_flg,
+	det.ISSUE_DESC, -- лимит на ГСЗ
+	det.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	det.PRODUCT_ANALYTIC_CD,
+	det.PRODUCT_NM,
+	det.FIRST_PAYMENT_MONTH, 
+	
+	det.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	det.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	
+	det.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	det.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	det.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	det.RISK_MANAGER_LOGIN_RK,
+	det.RISK_MANAGER_NM,
+	
+-- BEGIN: TП
+	det.BRANCH_NM,
+	det.BRANCH_RK
+FROM 	
+	VINTAGE_DETAIL_FINAL det
+	INNER JOIN VINTAGE_RANGE rng
+		ON(1=1
+			AND rng.RANGE_ORDER_ID<=det.MONTH_RANGE_ID
+	)
+GROUP BY 
+	rng.RANGE_ORDER_ID,
+	rng.DELINQUENCY_RANGE_NM,
+	det.REPORT_DT,
+  	det.BUSINESS_DT,
+	det.GENERATION_DT,-- Поколение
+	det.AGE, ---Возраст поколения
+	det.CURRENCY_ISO_CD,	
+	det.pl_flg,
+--	det.UW_FLAG,
+	det.turn_flg,
+	det.ISSUE_DESC, -- лимит на ГСЗ
+	det.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	det.PRODUCT_ANALYTIC_CD,
+	det.PRODUCT_NM,
+	det.FIRST_PAYMENT_MONTH, 
+	
+	det.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	CASE WHEN det.PRODUCT_OPERATIONAL_ID= 'ПЕ' THEN 'Y' ELSE 'N' END,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+	det.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	
+	det.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	det.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	det.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	det.RISK_MANAGER_LOGIN_RK,
+	det.RISK_MANAGER_NM,
+	
+-- BEGIN: TП
+	det.BRANCH_NM,
+	det.BRANCH_RK
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------			
+			
+			
+			
+			
+
+
+-----------------------------------------------------------------------------------------------------------------------
+--JOB--JOB--JOB--JOB--------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+/* **********************************************************************************************************
+Recovery  --- проверить
+* ********************************************************************************************************* */
+DROP TABLE VINTAGE_RE_P01;
+CREATE TABLE VINTAGE_RE_P01 AS
+(SELECT 
+	CAST('Recovery' AS VARCHAR(20)) AS PERFORMANCE,
+	gl.RANGE_ORDER_ID,
+	gl.DELINQUENCY_RANGE_NM,
+	gl.OUTSTANDING_CNT - COALESCE(nl.OUTSTANDING_CNT, 0 ) AS OUTSTANDING_CNT,
+	gl.OUTSTANDING_RUR_AMT - COALESCE(nl.OUTSTANDING_RUR_AMT, 0 ) AS OUTSTANDING_RUR_AMT,
+	gl.REPORT_DT,
+  	gl.BUSINESS_DT,
+	gl.GENERATION_DT,-- Поколение
+	gl.AGE, ---Возраст поколения
+	gl.CURRENCY_ISO_CD,	
+	gl.pl_flg,	
+--	gl.UW_FLAG,
+	gl.turn_flg,
+	gl.ISSUE_DESC, -- лимит на ГСЗ
+	gl.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+	gl.PRODUCT_ANALYTIC_CD,
+	gl.PRODUCT_NM,
+	gl.FIRST_PAYMENT_MONTH, 
+	gl.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+	
+	gl.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	gl.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	gl.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	gl.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+	
+-- BEGIN: РМ
+	gl.RISK_MANAGER_LOGIN_RK,
+	gl.RISK_MANAGER_NM,
+	
+-- BEGIN: TП
+	gl.BRANCH_NM,
+	gl.BRANCH_RK
+FROM 	
+	VINTAGE_GL_P03 gl
+	LEFT JOIN VINTAGE_NL_P01 nl	
+		ON( 1=1 
+				AND gl.REPORT_DT = nl.REPORT_DT
+				AND gl.RANGE_ORDER_ID = nl.RANGE_ORDER_ID
+				AND gl.BUSINESS_DT = nl.BUSINESS_DT
+				AND gl.GENERATION_DT = nl.GENERATION_DT
+				AND gl.AGE = nl.AGE
+				AND gl.CURRENCY_ISO_CD = nl.CURRENCY_ISO_CD
+				AND gl.pl_flg = nl.pl_flg
+--				AND gl.UW_FLAG = nl.UW_FLAG
+				AND gl.turn_flg = nl.turn_flg
+				AND gl.ISSUE_DESC = nl.ISSUE_DESC
+				AND gl.GSZ_LIMIT_DESC = nl.GSZ_LIMIT_DESC
+
+				AND gl.PRODUCT_ANALYTIC_CD = nl.PRODUCT_ANALYTIC_CD
+				AND gl.RBP_FLG = nl.RBP_FLG
+				
+				AND gl.NULL_LIMIT_FLG = nl.NULL_LIMIT_FLG
+				AND gl.NEGATIVE_COMMENT_FLG = nl.NEGATIVE_COMMENT_FLG 
+				AND gl.DEAL_TYPE_DESC = nl.DEAL_TYPE_DESC
+				
+				AND gl.RISK_MANAGER_LOGIN_RK = nl.RISK_MANAGER_LOGIN_RK
+				AND gl.BRANCH_RK = nl.BRANCH_RK
+			)	
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------			
+
+
+
+
+DROP TABLE VINTAGE_PRE_FINAL;
+CREATE TABLE VINTAGE_PRE_FINAL AS
+(
+		SELECT
+			re.PERFORMANCE,
+			re.RANGE_ORDER_ID,
+			re.DELINQUENCY_RANGE_NM,
+			re.OUTSTANDING_CNT,
+			re.OUTSTANDING_RUR_AMT,
+			re.REPORT_DT,
+			re.BUSINESS_DT,
+			re.GENERATION_DT,-- Поколение
+			re.AGE, ---Возраст поколения
+			re.CURRENCY_ISO_CD,	
+			re.pl_flg, 	
+--			re.UW_FLAG,
+			re.turn_flg,
+			re.ISSUE_DESC, -- лимит на ГСЗ
+			re.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+			re.PRODUCT_ANALYTIC_CD,
+			re.PRODUCT_NM,
+			re.FIRST_PAYMENT_MONTH, 
+			
+			re.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			re.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			re.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			re.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			re.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			re.RISK_MANAGER_LOGIN_RK,
+			re.RISK_MANAGER_NM,
+	
+		-- BEGIN: TП
+			re.BRANCH_NM,
+			re.BRANCH_RK
+		FROM			
+			VINTAGE_RE_P01 re
+
+UNION ALL
+			
+			SELECT
+			gl.PERFORMANCE,
+			gl.RANGE_ORDER_ID,
+			gl.DELINQUENCY_RANGE_NM,
+			gl.OUTSTANDING_CNT,
+			gl.OUTSTANDING_RUR_AMT,
+			gl.REPORT_DT,
+			gl.BUSINESS_DT,
+			gl.GENERATION_DT,-- Поколение
+			gl.AGE, ---Возраст поколения
+			gl.CURRENCY_ISO_CD,		
+			gl.pl_flg, 
+--			gl.UW_FLAG,
+			gl.turn_flg,
+			gl.ISSUE_DESC, -- лимит на ГСЗ
+			gl.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+			gl.PRODUCT_ANALYTIC_CD,
+			gl.PRODUCT_NM,
+			gl.FIRST_PAYMENT_MONTH, 
+			
+			gl.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			gl.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			gl.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			gl.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			gl.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			gl.RISK_MANAGER_LOGIN_RK,
+			gl.RISK_MANAGER_NM,
+
+		-- BEGIN: TП
+			gl.BRANCH_NM,
+			gl.BRANCH_RK
+		FROM					
+			VINTAGE_GL_P03 gl
+	
+UNION ALL
+			
+		SELECT
+			nl.PERFORMANCE,
+			nl.RANGE_ORDER_ID,
+			nl.DELINQUENCY_RANGE_NM,
+			nl.OUTSTANDING_CNT,
+			nl.OUTSTANDING_RUR_AMT,
+			nl.REPORT_DT,
+			nl.BUSINESS_DT,
+			nl.GENERATION_DT,-- Поколение
+			nl.AGE, ---Возраст поколения
+			nl.CURRENCY_ISO_CD,		
+			nl.pl_flg, 
+--			nl.UW_FLAG,
+			nl.turn_flg,
+			nl.ISSUE_DESC, -- лимит на ГСЗ
+			nl.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+			nl.PRODUCT_ANALYTIC_CD,
+			nl.PRODUCT_NM,
+			nl.FIRST_PAYMENT_MONTH, 
+			
+			nl.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			nl.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			nl.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			nl.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			nl.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			nl.RISK_MANAGER_LOGIN_RK,
+			nl.RISK_MANAGER_NM,
+
+		-- BEGIN: TП
+			nl.BRANCH_NM,
+			nl.BRANCH_RK
+		FROM								
+				VINTAGE_NL_P01 nl	
+				
+) WITH DATA
+PRIMARY INDEX (PERFORMANCE, BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+DROP TABLE VINTAGE_PERFORMANCE;
+CREATE VOLATILE TABLE VINTAGE_PERFORMANCE (PERFORMANCE ) AS 
+( 
+SELECT 
+CAST('Net Losses' AS VARCHAR(20)) FROM dua
+UNION ALL
+SELECT 
+CAST('Gross Losses' AS VARCHAR(20)) FROM dua
+UNION ALL
+SELECT 
+CAST('Recovery' AS VARCHAR(20)) FROM dua
+) WITH DATA ON COMMIT PRESERVE ROWS;
+------------------------это тоже ради избавления от ошибки Unoptimized Query
+
+
+DROP TABLE VINTAGE_PTRN_FINAL;
+CREATE TABLE VINTAGE_PTRN_FINAL  AS 
+(SELECT
+	ptrn.BUSINESS_DT,
+	ptrn.GENERATION_DT,
+	ptrn.RANGE_ORDER_ID,
+	ptrn.PRODUCT_ANALYTIC_CD,
+	per.PERFORMANCE
+FROM 
+	VINTAGE_PATTERN ptrn,
+		(
+		SELECT
+				DISTINCT 
+					PERFORMANCE
+				FROM  VINTAGE_PERFORMANCE --VINTAGE_PRE_FINAL 
+		) per
+) WITH DATA
+PRIMARY INDEX (PERFORMANCE, GENERATION_DT, RANGE_ORDER_ID, PRODUCT_ANALYTIC_CD);  
+
+
+
+DROP TABLE VINTAGE_PRE_FINAL_1;
+CREATE TABLE VINTAGE_PRE_FINAL_1 AS
+(
+		SELECT
+			vin.REPORT_DT,
+	
+			COUNT(vin.MIGR_ROOT_AGREEMENT_RK) AS ISSUE_CNT,
+			SUM(vin.ISSUE_RUR_AMT) AS ISSUE_RUR_AMT,
+			vin.BUSINESS_DT,
+			vin.GENERATION_DT,-- Поколение
+			vin.AGE, 
+			vin.CURRENCY_ISO_CD,	
+			vin.pl_flg, 	
+--			vin.UW_FLAG,
+			vin.turn_flg,
+			vin.ISSUE_DESC, 
+			vin.GSZ_LIMIT_DESC,
+			vin.PRODUCT_ANALYTIC_CD,
+			vin.PRODUCT_NM,
+			vin.FIRST_PAYMENT_MONTH, 
+			
+			vin.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			vin.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			vin.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			vin.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			vin.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			vin.RISK_MANAGER_LOGIN_RK,
+			vin.RISK_MANAGER_NM,
+
+		-- BEGIN: TП
+			vin.BRANCH_NM,
+			vin.BRANCH_RK
+		FROM			
+			VINTAGE_DETAIL_FINAL vin
+		GROUP BY
+			vin.REPORT_DT,
+			
+			vin.BUSINESS_DT,
+			vin.GENERATION_DT,-- Поколение
+			vin.AGE, 
+			vin.CURRENCY_ISO_CD,		
+			vin.pl_flg, 
+--			vin.UW_FLAG,
+			vin.turn_flg,
+			vin.ISSUE_DESC,
+			vin.GSZ_LIMIT_DESC,
+			vin.PRODUCT_ANALYTIC_CD,
+			vin.PRODUCT_NM,
+			vin.FIRST_PAYMENT_MONTH, 
+			
+			vin.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			CASE WHEN vin.PRODUCT_OPERATIONAL_ID= 'ПЕ' THEN 'Y' ELSE 'N' END,	-- Признак технологии ПЕ  -- 095.084. Потребительские кредиты: Открытый рынок без технологии ПЕ
+			vin.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			vin.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			vin.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			vin.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			vin.RISK_MANAGER_LOGIN_RK,
+			vin.RISK_MANAGER_NM,
+			
+		-- BEGIN: TП
+			vin.BRANCH_NM,
+			vin.BRANCH_RK
+) WITH DATA
+PRIMARY INDEX (BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+	----------------------------------------------------------------------------------------------------------------------------
+DROP TABLE VINTAGE_PRE_FINAL_2;
+CREATE TABLE VINTAGE_PRE_FINAL_2 AS
+(SELECT
+	vin.REPORT_DT,
+		
+	prt.RANGE_ORDER_ID,
+	prt.PERFORMANCE,
+			
+	vin.ISSUE_CNT,
+	vin.ISSUE_RUR_AMT,
+	vin.BUSINESS_DT,
+	vin.GENERATION_DT,-- Поколение
+	vin.AGE, 
+	vin.CURRENCY_ISO_CD,		
+	vin.pl_flg,
+--	vin.UW_FLAG,
+	vin.turn_flg,
+	vin.ISSUE_DESC, 
+	vin.GSZ_LIMIT_DESC,
+	vin.PRODUCT_ANALYTIC_CD,
+	vin.PRODUCT_NM,
+	vin.FIRST_PAYMENT_MONTH, 
+	
+	vin.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+	vin.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+	vin.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+	vin.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+	vin.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+	vin.RISK_MANAGER_LOGIN_RK,
+	vin.RISK_MANAGER_NM,
+			
+		-- BEGIN: TП
+	vin.BRANCH_NM,
+	vin.BRANCH_RK
+FROM			
+	VINTAGE_PRE_FINAL_1 vin
+		LEFT JOIN VINTAGE_PTRN_FINAL  prt 
+				ON ( 1=1
+						AND prt.BUSINESS_DT = vin.BUSINESS_DT 
+						AND prt.GENERATION_DT = vin.GENERATION_DT 
+						AND prt.PRODUCT_ANALYTIC_CD = vin.PRODUCT_ANALYTIC_CD
+					)
+) WITH DATA
+PRIMARY INDEX (PERFORMANCE, BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+DROP TABLE VINTAGE_FINAL;
+CREATE TABLE VINTAGE_FINAL AS
+(
+		SELECT
+			vin.REPORT_DT,
+			vin.ISSUE_CNT,
+			vin.ISSUE_RUR_AMT,
+			
+			vin.PERFORMANCE,
+			vin.RANGE_ORDER_ID,
+			rng.DELINQUENCY_RANGE_NM,
+			COALESCE(dlq.OUTSTANDING_CNT, 0 ) AS OUTSTANDING_CNT,
+			COALESCE(dlq.OUTSTANDING_RUR_AMT, 0 ) AS OUTSTANDING_RUR_AMT,
+			
+			vin.BUSINESS_DT,
+			vin.GENERATION_DT,-- Поколение
+			vin.AGE, 
+			vin.CURRENCY_ISO_CD,		
+			vin.pl_flg,
+--			vin.UW_FLAG,
+			vin.turn_flg,
+			vin.ISSUE_DESC, -- лимит на ГСЗ
+			vin.GSZ_LIMIT_DESC, -- лимит на ГСЗ
+
+			vin.PRODUCT_ANALYTIC_CD,
+			vin.PRODUCT_NM,
+			vin.FIRST_PAYMENT_MONTH, 
+			
+			vin.BALANCE_FLG,						-- Признак реальной выдачи кредита 
+			vin.RBP_FLG,								-- Признак программы RBP+20%  --095.084. Потребительские кредиты: Открытый рынок без технологии RBP+20%
+			
+			vin.NULL_LIMIT_FLG,	-- Признак одобрения ненулевого лимита по карте
+			vin.NEGATIVE_COMMENT_FLG,	-- Негативное заменчание (СПЗ)  -- Результат проверки СПЗ
+			vin.DEAL_TYPE_DESC, -- тип сделки  (Наличие нетиповых условий, Наличие изменения сущ. условий)
+			
+		-- BEGIN: РМ
+			vin.RISK_MANAGER_LOGIN_RK,
+			vin.RISK_MANAGER_NM,
+			
+		-- BEGIN: TП
+			vin.BRANCH_NM,
+			vin.BRANCH_RK
+		FROM			
+			VINTAGE_PRE_FINAL_2 vin
+			LEFT JOIN VINTAGE_PRE_FINAL  dlq
+			ON ( 1=1
+					AND vin.REPORT_DT = dlq.REPORT_DT
+					
+					AND vin.PERFORMANCE = dlq.PERFORMANCE
+					AND vin.RANGE_ORDER_ID = dlq.RANGE_ORDER_ID
+					
+					AND vin.BUSINESS_DT = dlq.BUSINESS_DT
+					AND vin.GENERATION_DT = dlq.GENERATION_DT
+					AND vin.AGE =  dlq.AGE
+					AND vin.CURRENCY_ISO_CD =  dlq.CURRENCY_ISO_CD
+					AND vin.pl_flg = dlq.pl_flg
+--					AND COALESCE(vin.UW_FLAG,-1) = COALESCE(dlq.UW_FLAG,-1)
+					AND COALESCE(vin.turn_flg,-1) = COALESCE(dlq.turn_flg,-1)
+					AND vin.ISSUE_DESC =  dlq.ISSUE_DESC
+					AND vin.GSZ_LIMIT_DESC =  dlq.GSZ_LIMIT_DESC
+					
+					AND vin.PRODUCT_ANALYTIC_CD =  dlq.PRODUCT_ANALYTIC_CD
+					AND vin.FIRST_PAYMENT_MONTH =  dlq.FIRST_PAYMENT_MONTH
+					
+					AND vin.BALANCE_FLG =  dlq.BALANCE_FLG
+					AND vin.RBP_FLG =  dlq.RBP_FLG
+					
+					AND vin.NULL_LIMIT_FLG =  dlq.NULL_LIMIT_FLG
+					AND vin.NEGATIVE_COMMENT_FLG =  dlq.NEGATIVE_COMMENT_FLG
+					AND vin.DEAL_TYPE_DESC =  dlq.DEAL_TYPE_DESC
+					
+				-- BEGIN: РМ
+					AND vin.RISK_MANAGER_LOGIN_RK =  dlq.RISK_MANAGER_LOGIN_RK
+
+				-- BEGIN: TП
+					AND vin.BRANCH_RK =  dlq.BRANCH_RK
+				)
+	LEFT JOIN VINTAGE_RANGE AS rng
+		ON(1=1
+				AND rng.RANGE_ORDER_ID = vin.RANGE_ORDER_ID
+			)
+WHERE 
+	vin.BUSINESS_DT- ADD_MONTHS(  vin.GENERATION_DT, vin.FIRST_PAYMENT_MONTH + CAST(rng.RANGE_BEGIN_DAYS_CNT /30 AS INTEGER)) >= 0	
+) WITH DATA
+PRIMARY INDEX (REPORT_DT, PERFORMANCE, RANGE_ORDER_ID, BUSINESS_DT, GENERATION_DT, PRODUCT_ANALYTIC_CD, BRANCH_RK, RISK_MANAGER_LOGIN_RK);
+----------------------------------------------------------------------------------------------------------------------------
+	
+GRANT SELECT ON vint_det TO andrievskiyaa;
+GRANT SELECT ON vintage_advances TO andrievskiyaa;
+GRANT SELECT ON vintage_detail_final TO andrievskiyaa;
+GRANT SELECT ON vintage_final TO andrievskiyaa;
+GRANT SELECT ON vint_det TO yastrebovaas;
+GRANT SELECT ON vintage_advances TO yastrebovaas;
+GRANT SELECT ON vintage_detail_final TO yastrebovaas;
+GRANT SELECT ON vintage_final TO yastrebovaas;
+GRANT SELECT ON vint_det TO butev;
+GRANT SELECT ON vintage_advances TO butev;
+GRANT SELECT ON vintage_detail_final TO butev;
+GRANT SELECT ON vintage_final TO butev;	
+	
+  
+/*
+PRODUCT_ANALYTIC_CD in (2,9,   3,7,89,300,316,    85,86,87,88,117,217,   52,84,224)
+
+АВТО 
+PRODUCT_ANALYTIC_CD in (2,9)
+095.002.Автокредитование Стандарт
+095.009.Автокредитование Лайт
+
+ИПОТЕКА
+PRODUCT_ANALYTIC_CD in (3,7,89,300,316)
+095.003.Ипотека
+095.007.Ипотека КИТ Финанс
+095.089.Ипотека. Социальная
+095.300.Ипотека. Для военных
+095.316.Ипотека. Победа над формальностями
+
+КАРТЫ
+PRODUCT_ANALYTIC_CD in (85,86,87,88,117,217)
+095.085. Кредитные карты Gold
+095.086. Кредитные карты Classic
+095.087. Кредитные карты Platinum
+095.088. Кредитные карты Infinite
+095.117. Кредитные карты Пакета Привилегия
+095.217. Кредитные карты Пакета Приоритет
+
+ПОТРЕБЫ
+PRODUCT_ANALYTIC_CD in (52,84,224)
+095. 052. Потребительские кредиты: Корпоративный канал (не зарплатные)
+095. 084. Потребительские кредиты: Открытый рынок
+095. 224. Потребительские кредиты: Рефинансирование
+
+
+
+SEL 
+	SUM(ISSUE_CNT) as ISSUE_CNT,
+	SUM(ISSUE_RUR_AMT) as ISSUE_RUR_AMT,
+	SUM(OUTSTANDING_CNT) as OUTSTANDING_CNT,
+	SUM(OUTSTANDING_RUR_AMT) as  OUTSTANDING_RUR_AMT,
+	PERFORMANCE,
+	DELINQUENCY_RANGE_NM, 
+	BUSINESS_DT,
+	GENERATION_DT,
+	AGE, 
+	CURRENCY_ISO_CD,		
+	PRODUCT_ANALYTIC_CD,
+	PRODUCT_NM
+FROM  VINTAGE_FINAL
+GROUP BY 
+	PERFORMANCE,
+	DELINQUENCY_RANGE_NM, 
+	BUSINESS_DT,
+	GENERATION_DT,
+	AGE, 
+	CURRENCY_ISO_CD,		
+	PRODUCT_ANALYTIC_CD,
+	PRODUCT_NM
+*/
