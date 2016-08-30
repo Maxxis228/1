@@ -1,0 +1,139 @@
+-----------------------------------------------------------------------------------
+--тут все бакеты считаются накопленным итогом, так, просрочка 90+ входит и в 60+ и в 30+ и в 7+ и в 0+. 
+--Чтобы посмотреть выходы в конкретный бакет, надо вместо 9999 написать соответствующее количество дней.
+-----------------------------------------------------------------------------------
+DROP TABLE mpsp_config;
+CREATE TABLE MPSP_CONFIG (FACTOR, DAYS_FROM, DAYS_TO, GEN_DIFF, AGE) AS (
+
+    SELECT CAST('7+ по 3 поколениям' AS VARCHAR(30)), 8, 9999, 2, 2 FROM dua
+    UNION ALL
+    SELECT CAST('7+ по 3 поколениям' AS VARCHAR(30)), 8, 9999, 3, 3 FROM dua
+    UNION ALL
+    SELECT CAST('7+ по 3 поколениям' AS VARCHAR(30)), 8, 9999, 4, 4 FROM dua
+    	 
+	 UNION ALL
+	 SELECT CAST('30+ по 2 поколениям' AS VARCHAR(30)), 31, 9999, 3, 3 FROM dua
+	 UNION ALL
+	 SELECT CAST('30+ по 2 поколениям' AS VARCHAR(30)), 31, 9999, 4, 4 FROM dua
+	 
+	 UNION ALL
+	 SELECT CAST('30+ по 3 поколениям' AS VARCHAR(30)), 31, 9999, 3, 3 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 3 поколениям' AS VARCHAR(30)), 31, 9999, 4, 4 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 3 поколениям' AS VARCHAR(30)), 31, 9999, 5, 5 FROM dua
+    
+	 UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 3, 3 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 4, 4 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 5, 5 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 6, 6 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 7, 7 FROM dua
+    UNION ALL
+    SELECT CAST('30+ по 6 поколениям' AS VARCHAR(30)), 31, 9999, 8, 8 FROM dua
+    
+    UNION ALL
+    SELECT CAST('7+ на 2 возрасте' AS VARCHAR(30)), 8, 9999, 2, 2 FROM dua
+    UNION ALL
+    SELECT CAST('7+ на 2 возрасте' AS VARCHAR(30)), 8, 9999, 3, 2 FROM dua
+    UNION ALL
+    SELECT CAST('7+ на 2 возрасте' AS VARCHAR(30)), 8, 9999, 4, 2 FROM dua
+    
+    UNION ALL
+    SELECT CAST('30+ на 3 возрасте' AS VARCHAR(30)), 31, 9999, 3, 3 FROM dua
+    UNION ALL
+    SELECT CAST('30+ на 3 возрасте' AS VARCHAR(30)), 31, 9999, 4, 3 FROM dua
+    UNION ALL
+    SELECT CAST('30+ на 3 возрасте' AS VARCHAR(30)), 31, 9999, 5, 3 FROM dua
+    
+    UNION ALL
+    SELECT CAST('30+ на 5 возрасте' AS VARCHAR(30)), 31, 9999, 5, 5 FROM dua
+    UNION ALL
+    SELECT CAST('30+ на 5 возрасте' AS VARCHAR(30)), 31, 9999, 6, 5 FROM dua
+    UNION ALL
+    SELECT CAST('30+ на 5 возрасте' AS VARCHAR(30)), 31, 9999, 7, 5 FROM dua
+    
+    UNION ALL
+    SELECT CAST('90+ на 6 возрасте' AS VARCHAR(30)), 91, 9999, 6, 6 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 6 возрасте' AS VARCHAR(30)), 91, 9999, 7, 6 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 6 возрасте' AS VARCHAR(30)), 91, 9999, 8, 6 FROM dua
+    
+    UNION ALL
+    SELECT CAST('90+ на 12 возрасте' AS VARCHAR(30)), 91, 9999, 12, 12 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 12 возрасте' AS VARCHAR(30)), 91, 9999, 13, 12 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 12 возрасте' AS VARCHAR(30)), 91, 9999, 14, 12 FROM dua
+        
+    UNION ALL
+    SELECT CAST('90+ на 7 возрасте' AS VARCHAR(30)), 91, 9999, 7, 7 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 7 возрасте' AS VARCHAR(30)), 91, 9999, 8, 7 FROM dua
+    UNION ALL
+    SELECT CAST('90+ на 7 возрасте' AS VARCHAR(30)), 91, 9999, 9, 7 FROM dua
+    
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 5, 5 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 6, 6 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 7, 7 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 8, 8 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 9, 9 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 6 поколениям' AS VARCHAR(30)), 91, 9999, 10, 10 FROM dua
+    
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 5, 5 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 6, 6 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 7, 7 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 8, 8 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 9, 9 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 10, 10 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 11, 11 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 12, 12 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 9 поколениям' AS VARCHAR(30)), 91, 9999, 13, 13 FROM dua
+    
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 5, 5 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 6, 6 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 7, 7 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 8, 8 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 9, 9 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 10, 10 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 11, 11 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 12, 12 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 13, 13 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 14, 14 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 15, 15 FROM dua
+    UNION ALL
+    SELECT CAST('90+ по 12 поколениям' AS VARCHAR(30)), 91, 9999, 16, 16 FROM dua    
+) WITH DATA
+
+;
