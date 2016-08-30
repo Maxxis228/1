@@ -1,0 +1,291 @@
+DROP TABLE factor_details;
+CREATE TABLE factor_details AS
+(
+SELECT
+DET.REPORT_DT,
+DET.GENERATION_DT,
+DET.AGE,
+DET.SOURCE_SYSTEM_CD,
+DET.CONTRACT_ID,
+DET.SOURCE_SYSTEM_CD||DET.CONTRACT_ID AS ID,
+DET.ISSUE_RUR_AMT,
+DET.PL_FLG,
+DET.PRODUCT_NM,
+DET.REGIONAL_OPER_OFFICE_NM,
+DET.MONTHMAX_CNT,
+DET.MONTHMAX_DT,
+DET.MONTH_LVL_NM,
+DET.NL_PRI_BALANCE_AMT+DET.NL_OVERDUE_PRI_BALANCE_AMT AS DEBT_NL,
+c.FACTOR,
+ADD_MONTHS(MONTH_BEGIN(report_dt), -cc.GEN_START) AS GEN_MIN,
+ADD_MONTHS(MONTH_BEGIN(report_dt), -cc.GEN_END) AS GEN_MAX,
+org.INTERNAL_ORG_ID||' '||org.INTERNAL_ORG_NM AS INTERNAL_ORG_NM,
+cu.CUSTOMER_FULL_NM AS CUSTOMER_NM,
+lh.EMPLOYEE_LOGIN,
+lh.EMPLOYEE_NM
+--дописать сюда выдачи
+FROM 
+vintage_detail_final DET
+
+LEFT JOIN mpsp_config c
+ON 
+DET.monthmax_cnt BETWEEN c.days_from AND c.days_to
+AND 
+DET.age = c.age
+AND
+MONTHS_BETWEEN(MONTH_BEGIN(report_dt),generation_dt) = c.gen_diff
+
+LEFT JOIN (
+SELECT 
+factor, MAX(GEN_DIFF) AS GEN_START, MIN(GEN_DIFF) AS GEN_END
+FROM mpsp_config
+GROUP BY factor
+) cc
+ON c.factor = cc.factor
+
+LEFT JOIN
+(SELECT DISTINCT
+agreement_rk, customer_rk, customer_type_cd
+FROM dds.app_prt
+WHERE 
+app_prt_type_cd = 'ЗАЯВКИ'
+AND product_operational_id IN ('МН', 'ПМ', 'ПЭ', 'ПЯ')
+AND deleted_flg = '0'
+AND effective_from_dttm <= CURRENT_DATE
+AND effective_to_dttm >= CURRENT_DATE
+) a
+ON a.agreement_rk = DET.application_rk
+
+LEFT JOIN 
+(SELECT
+s.AGREEMENT_RK,
+l.LOGIN_ID AS EMPLOYEE_LOGIN,
+COALESCE(l.EMPLOYEE_FULL_NM, l.EMPLOYEE_SHORT_NM) AS EMPLOYEE_NM
+FROM
+DDS.APP_PRT_STATUS_HISTORY s
+JOIN
+DDS.LOGIN_HIST l
+ON l.LOGIN_RK = s.LOGIN_RK
+AND l.SOURCE_SYSTEM_CD = s.SOURCE_SYSTEM_CD
+AND l.EFFECTIVE_FROM_DTTM <= s.INPUT_DT
+AND l.EFFECTIVE_TO_DTTM >= s.INPUT_DT
+AND l.DELETED_FLG = '0'
+WHERE 
+( s.APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') OR s.PREV_APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') )
+AND s.DELETED_FLG = '0'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY s.AGREEMENT_RK ORDER BY s.STATUS_START_DTTM DESC) = 1
+) lh
+ON 	lh.AGREEMENT_RK = DET.APPLICATION_RK
+
+LEFT JOIN dds.customer_global_registry cu
+ON cu.customer_rk = a.customer_rk
+AND cu.customer_type_cd = a.customer_type_cd
+AND cu.deleted_flg = '0'
+AND cu.effective_from_dttm <= CURRENT_DATE
+AND cu.effective_to_dttm >= CURRENT_DATE
+
+LEFT JOIN dds.internal_org org
+ON DET.MIGR_INIT_EXTRA_OFFICE_RK=org.INTERNAL_ORG_RK
+AND org.deleted_flg = '0'
+AND org.effective_from_dttm <= report_dt
+AND org.effective_to_dttm >= report_dt
+
+) WITH DATA;
+
+
+DROP TABLE MPSP_ADVANCES;
+CREATE VOLATILE TABLE MPSP_ADVANCES AS
+(SELECT
+	dar.report_dt,
+	dar.GENERATION_DT,-- Поколение
+	COUNT(MIGR_ROOT_AGREEMENT_RK) AS ISSUE_CNT,
+	SUM(dar.ISSUE_RUR_AMT) AS ISSUE_RUR_AMT,
+	dar.PRODUCT_NM,
+	dar.BRANCH_NM,
+	lh.EMPLOYEE_LOGIN,
+	lh.EMPLOYEE_NM
+
+FROM VINTAGE_DETAIL_FINAL dar
+
+LEFT JOIN 
+(SELECT
+s.AGREEMENT_RK,
+l.LOGIN_ID AS EMPLOYEE_LOGIN,
+COALESCE(l.EMPLOYEE_FULL_NM, l.EMPLOYEE_SHORT_NM) AS EMPLOYEE_NM
+FROM
+DDS.APP_PRT_STATUS_HISTORY s
+JOIN
+DDS.LOGIN_HIST l
+ON l.LOGIN_RK = s.LOGIN_RK
+AND l.SOURCE_SYSTEM_CD = s.SOURCE_SYSTEM_CD
+AND l.EFFECTIVE_FROM_DTTM <= s.INPUT_DT
+AND l.EFFECTIVE_TO_DTTM >= s.INPUT_DT
+AND l.DELETED_FLG = '0'
+WHERE 
+( s.APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') OR s.PREV_APP_PRT_STATUS_CD IN ('БВЛ','БВЛ|БВЛ','БЗВ', 'БЗВ|БЗВ') )
+AND s.DELETED_FLG = '0'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY s.AGREEMENT_RK ORDER BY s.STATUS_START_DTTM DESC) = 1
+) lh
+ON 	lh.AGREEMENT_RK = dar.APPLICATION_RK
+
+WHERE 
+	dar.REPORT_DT=dar.BUSINESS_DT
+GROUP BY 		
+	dar.report_dt,
+	dar.GENERATION_DT,-- Поколение
+	dar.PRODUCT_NM,
+	dar.BRANCH_NM,
+	lh.EMPLOYEE_LOGIN,
+	lh.EMPLOYEE_NM
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+DROP TABLE mpsp_factor;
+CREATE TABLE mpsp_factor AS 
+(
+SELECT 
+f.report_dt, f.product_nm, f.factor, f.regional_oper_office_nm, f.internal_org_nm, 
+f.employee_login, f.employee_nm, f.debt_nl, f.debt_nl_avg, f.debt_cnt, 
+aa.issue_cnt AS bnk_issue_cnt, aa.issue_rur_amt AS bnk_issue_rur_amt, 
+ff.debt_nl AS bnk_debt_amt, 
+SUM(a.issue_cnt) AS issue_cnt, SUM(a.issue_rur_amt) AS issue_rur_amt,
+AVG(a.issue_rur_amt) AS issue_rur_avg
+
+FROM
+(SELECT
+f.REPORT_DT,
+f.PRODUCT_NM,
+f.REGIONAL_OPER_OFFICE_NM,
+f.FACTOR,
+f.GEN_MIN,
+f.GEN_MAX,
+f.INTERNAL_ORG_NM AS INTERNAL_ORG_NM,
+f.EMPLOYEE_LOGIN,
+f.EMPLOYEE_NM,
+SUM(f.DEBT_NL) AS DEBT_NL,
+AVG(f.DEBT_NL) AS DEBT_NL_AVG,
+COUNT(f.ID) AS DEBT_CNT
+FROM factor_details f
+GROUP BY 1,2,3,4,5,6,7,8,9
+--WHERE f.factor IS NOT NULL
+) f
+
+LEFT JOIN
+(SELECT
+f.REPORT_DT,
+f.PRODUCT_NM,
+f.FACTOR,
+SUM(f.DEBT_NL) AS DEBT_NL
+FROM factor_details f
+GROUP BY 1,2,3
+--WHERE f.factor IS NOT NULL
+) ff
+ON f.report_dt = ff.report_dt
+AND f.product_nm = ff.product_nm
+AND f.factor = ff.factor 
+
+LEFT JOIN
+(SELECT
+a.report_dt,
+a.GENERATION_DT,-- Поколение
+a.PRODUCT_NM,
+a.EMPLOYEE_LOGIN,
+a.EMPLOYEE_NM,
+SUM(a.ISSUE_CNT) AS ISSUE_CNT,
+SUM(a.ISSUE_RUR_AMT) AS ISSUE_RUR_AMT
+FROM mpsp_advances a
+GROUP BY 1,2,3,4,5
+) a
+ON f.report_dt = a.report_dt
+AND f.product_nm = a.product_nm
+AND f.employee_login = a.employee_login
+AND a.generation_dt BETWEEN f.gen_min AND f.gen_max
+
+LEFT JOIN
+(SELECT
+a.report_dt,
+a.PRODUCT_NM,
+c.factor,
+SUM(a.ISSUE_CNT) AS ISSUE_CNT,
+SUM(a.ISSUE_RUR_AMT) AS ISSUE_RUR_AMT
+
+FROM 
+(SELECT 
+c.factor,
+MIN(c.gen_diff) AS gen_end,
+MAX(c.gen_diff) AS gen_start
+FROM mpsp_config c
+GROUP BY 1
+) c
+
+LEFT JOIN
+(SELECT 
+a.report_dt,
+a.product_nm,
+a.generation_dt,
+SUM(a.issue_cnt) AS issue_cnt,
+SUM(a.issue_rur_amt) AS issue_rur_amt
+FROM mpsp_advances a
+GROUP BY 1,2,3
+) a
+ON a.generation_dt BETWEEN (ADD_MONTHS(MONTH_BEGIN(a.report_dt), -c.gen_start)) AND (ADD_MONTHS(MONTH_BEGIN(a.report_dt), -c.gen_end))
+
+GROUP BY 1,2,3
+) aa
+ON f.report_dt = aa.report_dt
+AND f.product_nm = aa.product_nm
+AND f.factor = aa.factor
+
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13
+
+) WITH DATA;
+
+DROP TABLE mpsp_factor_agg;
+CREATE TABLE mpsp_factor_agg AS
+(SELECT
+f.*, 
+m.AR AS m_AR, m.AR_DAR AS m_AR_DAR, m.SPZ_VP AS m_SPZ_VP, m.Processed AS m_PROCESSED, m.Total AS m_TOTAL,
+m.PD_avg AS m_PD_AVG, m.PD_gen AS m_PD_GEN, m.PD_bnk AS m_PD_BNK,
+p.AR AS p_AR, p.AR_DAR AS p_AR_DAR, p.SPZ_VP AS p_SPZ_VP, p.Processed AS p_PROCESSED, p.Total AS p_TOTAL,
+p.PD_avg AS p_PD_AVG, p.PD_gen AS p_PD_GEN, p.PD_bnk AS p_PD_BNK
+FROM
+mpsp_factor f
+
+LEFT JOIN
+(SELECT 
+generation_dt, employee_nm,
+COALESCE(CAST(SUM(Appr) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS AR, 
+COALESCE(CAST(SUM(Appr_DAR) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS AR_DAR, 
+COALESCE(CAST(SUM(Rej_SPZ_VP) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS SPZ_VP,
+SUM(Processed) AS Processed,
+SUM(Scorable) AS Scorable,
+SUM(Total) AS Total,
+COALESCE(AVG(PD_avg),0) AS PD_avg,
+COALESCE(AVG(PD_gen),0) AS PD_gen, 
+COALESCE(AVG(PD_bnk),0) AS PD_bnk
+
+FROM mpsp_ar_pd_agg 
+GROUP BY 1,2
+)m
+ON MONTH_BEGIN(f.report_dt) = m.generation_dt
+AND f.employee_nm = m.employee_nm
+
+LEFT JOIN
+(SELECT 
+generation_dt,pos_id||' '||pos_nm AS internal_org_nm,
+COALESCE(CAST(SUM(Appr) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS AR, 
+COALESCE(CAST(SUM(Appr_DAR) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS AR_DAR, 
+COALESCE(CAST(SUM(Rej_SPZ_VP) AS DECIMAL(5,2))/CAST(COALESCE(NULLIFZERO(SUM(Processed)),1) AS DECIMAL(5,2)),0) AS SPZ_VP,
+SUM(Processed) AS Processed,
+SUM(Scorable) AS Scorable,
+SUM(Total) AS Total,
+COALESCE(AVG(PD_avg),0) AS PD_avg,
+COALESCE(AVG(PD_gen),0) AS PD_gen, 
+COALESCE(AVG(PD_bnk),0) AS PD_bnk
+FROM pos_ar_pd_agg 
+GROUP BY 1,2
+)p
+ON MONTH_BEGIN(f.report_dt) = p.generation_dt
+AND f.internal_org_nm = p.internal_org_nm
+
+) WITH DATA;
+
