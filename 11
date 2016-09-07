@@ -188,7 +188,7 @@ FROM
 	LEFT JOIN CDM.CD_LOAN_AGREEMENT AS cla
 		ON(	cla.AGREEMENT_RK = dar.MIGR_ROOT_AGREEMENT_RK
 				AND cla.DELETED_FLG = '0'
-				AND cla.CONTRACT_STATUS_CD NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ')
+				AND cla.CONTRACT_STATUS_CD NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ', 'ВВРД')
 			) 
 WHERE 1 = 1
 	QUALIFY ROW_NUMBER() OVER (PARTITION BY dar.MIGR_ROOT_AGREEMENT_RK ORDER BY cla.EFFECTIVE_FROM_DTTM ) =1
