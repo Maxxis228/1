@@ -1,0 +1,3007 @@
+drop table pos;
+create table pos as
+(
+ with
+ 	recursive hx (org_id, org_rk, lvl, parent_id, parent_rk, hierarchy_nm) as (
+ 		select
+		 	internal_org_id, internal_org_rk,
+		 	hierarhy_level,
+		 	parent_internal_org_id, parent_internal_org_rk,
+		 	org_hierarchy_cd
+		from dds.internal_org_hierarchy
+		where
+		 	((org_hierarchy_cd = 'ACCESS' and hierarhy_level in (2, 3)) or (org_hierarchy_cd = 'ГОИМДО' and hierarhy_level in (3, 4)))
+		 	and
+		 	effective_from_dttm <= current_date
+		 	and
+		 	effective_to_dttm >= current_date
+		 	and
+		 	deleted_flg = 0 and is_active_flg = 1
+		qualify
+			row_number() over (partition by internal_org_rk order by case when org_hierarchy_cd = 'ACCESS' then 1 else 2 end asc) = 1
+		 	
+		union all
+		
+		select
+			hx.org_id, hx.org_rk,
+			h.hierarhy_level,
+			h.parent_internal_org_id, h.parent_internal_org_rk,
+			h.org_hierarchy_cd
+		from
+			hx
+			
+			join
+				dds.internal_org_hierarchy h
+					on
+						h.internal_org_rk = hx.parent_rk
+						and
+						h.org_hierarchy_cd = hx.hierarchy_nm
+					 	and
+					 	h.effective_from_dttm <= current_date
+					 	and
+					 	h.effective_to_dttm >= current_date
+					 	and
+					 	h.deleted_flg = 0 and is_active_flg = 1
+	)
+select
+	coalesce(b.internal_org_id, o.internal_org_id) as branch_id,
+	coalesce(b.internal_org_nm, o.internal_org_nm) as branch_nm,
+	o.internal_org_id as office_id,
+	o.internal_org_nm as office_nm,
+	o.internal_org_type_cd as office_type,
+	p.internal_org_id as pos_id,
+	p.internal_org_nm as pos_nm,
+	p.internal_org_type_cd as pos_type,
+	--p.vip_office_fl as vip_fl,
+	p.district_geography_cd as district,
+	p.region_geography_cd as region,
+	p.moscow_region_cd as region_type,
+	p.city,
+	x.org_id,
+	x.org_rk
+	
+from
+	( select
+			distinct
+			org_id, org_rk, 
+			coalesce(min(pos_rk) over (partition by org_rk), org_rk) as pos_rk,
+			min(office_rk) over (partition by org_rk) as office_rk
+		from
+			( select
+					x.*,
+					case
+						when hierarchy_nm = 'ГОИМДО' then 2 /* ГО */
+						when hierarchy_nm = 'ACCESS' and lvl = 2 then parent_rk
+					end as office_rk,
+					case
+						when (hierarchy_nm = 'ACCESS' and lvl = 3) or (hierarchy_nm = 'ГОИМДО' and lvl = 4) then parent_rk
+					end as pos_rk
+					 
+				from
+					hx x
+					
+					join
+						dds.internal_org o
+							on
+								o.internal_org_rk = x.parent_rk
+								and
+								o.is_active_flg = 1
+			) x
+	) x
+	
+	left join
+		dds.internal_org o
+			on
+				o.internal_org_rk = x.office_rk
+				and
+				o.is_active_flg = 1
+				
+	left join
+		dds.internal_org p
+			on
+				p.internal_org_rk = x.pos_rk
+				and
+				p.is_active_flg = 1
+				
+	left join
+    dds.internal_org_hierarchy xb
+      on
+        xb.internal_org_rk = x.pos_rk
+        and
+        xb.org_hierarchy_cd = 'СВОД'
+        and
+			 	xb.effective_from_dttm <= current_date
+			 	and
+			 	xb.effective_to_dttm >= current_date
+			 	and
+			 	xb.deleted_flg = 0 and xb.is_active_flg = 1
+			 	
+	left join
+		dds.internal_org b
+			on
+				b.internal_org_rk = xb.parent_internal_org_rk
+				and
+				b.is_active_flg = 1
+
+union
+
+select
+	o.internal_org_id as branch_id,
+	o.internal_org_nm as branch_nm,
+	o.internal_org_id as office_id,
+	o.internal_org_nm as office_nm,
+	o.internal_org_type_cd as office_type,
+	o.internal_org_id as pos_id,
+	o.internal_org_nm as pos_nm,
+	o.internal_org_type_cd as pos_type,
+	o.district_geography_cd as district,
+	o.region_geography_cd as region,
+	o.moscow_region_cd as region_type,
+	o.city,
+	b.org_id,
+	b.org_rk
+from
+	(select
+		internal_org_id as org_id, internal_org_rk as org_rk
+	from dds.internal_org_hierarchy
+		where
+		 	org_hierarchy_cd = 'ACCESS'
+		 	and
+		 	hierarhy_level = 1
+		 	and
+		 	effective_from_dttm <= current_date
+		 	and
+		 	effective_to_dttm >= current_date
+		 	and
+		 	deleted_flg = 0 and is_active_flg = 1
+	)b
+	
+	left join
+		dds.internal_org o
+			on
+				o.internal_org_rk = b.org_rk
+				and
+				o.is_active_flg = 1
+)
+with data
+primary index(org_rk)
+;
+
+
+drop table product;
+create table product as (
+select
+	distinct
+	p.product_char_id as product_id,
+	p.product_nm as product_nm,
+	sp.product_char_id as subproduct_id,
+	sp.product_nm as subproduct_nm,
+	sp.product_rk
+from
+	dds.product_hist sp
+	
+	join
+		dds.product_hierarchy_hist sh
+			on
+				sh.product_rk = sp.product_rk
+				and
+				sh.effective_from_dttm <= current_date
+				and
+				sh.effective_to_dttm >= current_date
+				and
+				sh.deleted_flg = '0'
+				
+	join
+		dds.product_hist p
+			on
+				p.product_rk = sh.parent_product_rk
+				and
+				p.effective_from_dttm <= current_date
+				and
+				p.effective_to_dttm >= current_date
+				and
+				p.deleted_flg = '0'
+				and
+				p.product_type_cd <> '-1'
+where
+	sp.effective_from_dttm <= current_date
+	and
+	sp.effective_to_dttm >= current_date
+	and
+	sp.deleted_flg = '0'
+	and
+	sp.product_type_cd <> '-1'
+	and
+	sp.product_hierarchy_cd = '3'
+) with data
+primary index(product_rk)
+;
+
+drop table voting;
+create table voting as (
+select
+	p.application_agreement_rk as application_rk,
+	p.application_app_prt_type_cd as application_type_cd,
+	p.agreement_rk as protocol_rk,
+	p.app_prt_type_cd as protocol_type_cd,
+	p.open_dt as decision_dt,
+	coh.lpr_position_cd as position_cd,
+	coh.lpr_employee_nm as employee_nm,
+	coh.committee_result_info as res,
+	coh.lpr_employee_nm || ' (' || coh.committee_result_info || ')' as employee_res,
+	case
+		when coh.lpr_position_cd not in ('КМБ_RM_1', 'КМБ_RM')
+		then sum(case when coh.lpr_position_cd not in ('КМБ_RM_1', 'КМБ_RM') then 1 end) over (partition by p.application_app_prt_type_cd, p.application_agreement_rk order by p.agreement_rk desc, coh.member_num desc rows between unbounded preceding and current row)
+	end as dm_rn,
+	sum(case when coh.lpr_position_cd not in ('КМБ_RM_1', 'КМБ_RM') then 1 end) over (partition by p.application_app_prt_type_cd, p.application_agreement_rk order by p.agreement_rk desc, coh.member_num desc rows between unbounded preceding and unbounded following) as dm_rn_cnt,
+	case
+		when coh.lpr_position_cd in ('КМБ_RM_1', 'КМБ_RM')
+		then sum(case when coh.lpr_position_cd in ('КМБ_RM_1', 'КМБ_RM') then 1 end) over (partition by p.application_app_prt_type_cd, p.application_agreement_rk order by p.agreement_rk desc, coh.member_num desc rows between unbounded preceding and current row)
+	end as rm_rn,
+	sum(case when coh.lpr_position_cd in ('КМБ_RM_1', 'КМБ_RM') then 1 end) over (partition by p.application_app_prt_type_cd, p.application_agreement_rk order by p.agreement_rk desc, coh.member_num desc rows between unbounded preceding and unbounded following) as rm_rn_cnt
+from
+	dds.app_prt p
+	
+	left join
+		dds.app_prt_credit_committee_hist coh
+			on
+					coh.agreement_rk = p.agreement_rk
+					and
+					coh.app_prt_type_cd = p.app_prt_type_cd
+					and
+					coh.effective_from_dttm <= current_date
+					and
+					coh.effective_to_dttm >= current_date
+					and
+					coh.deleted_flg = '0'
+where
+	p.app_prt_type_cd = 'ПРОТОКОЛ'
+	and
+	p.product_operational_id in ('КР', 'ОК', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'МБ', 'МК', 'РЦ', 'РЛ', 'РЮ', 'МЮ', 'ВЮ', 'ОЮ')
+	and
+	p.deleted_flg = '0'
+	and
+	p.effective_from_dttm <= current_date
+	and
+	p.effective_to_dttm >= current_date
+	and
+	p.application_app_prt_type_cd = 'ЗАЯВКИ'
+) with data
+primary index (application_rk)
+;
+
+drop table protocol_result;
+create table protocol_result as (
+with
+	recursive co(application_rk, application_type_cd, dm_rn, rm_rn, dm_list, rm_list) as (
+		select application_rk, application_type_cd, dm_rn, rm_rn,
+			case when dm_rn is not null then coalesce(employee_res,'') end as dm_list,
+			case when rm_rn is not null then coalesce(employee_res,'') end as rm_list
+		from
+			voting where (dm_rn = dm_rn_cnt or rm_rn = rm_rn_cnt)
+			
+		union all
+		
+		select v.application_rk, v.application_type_cd, v.dm_rn, v.rm_rn,
+			case when v.dm_rn is not null then dm_list || case when length(dm_list) > 0 then '; ' else '' end || coalesce(employee_res,'') end as dm_list,
+			case when v.rm_rn is not null then rm_list || case when length(rm_list) > 0 then '; ' else '' end || coalesce(employee_res,'') end as rm_list
+		from
+			co co join voting v
+				on
+					v.application_rk = co.application_rk
+					and
+					v.application_type_cd = co.application_type_cd
+					and
+					(v.dm_rn = co.dm_rn - 1 or v.rm_rn = co.rm_rn - 1)
+	)
+select
+	p.*,
+	case when length(rm.rm_list) > 0 then 1 end as rm_fl,
+	rm.rm_list,
+	e.dm_list
+from
+	( select
+			application_rk, application_type_cd, max(decision_dt) as decision_dt 
+		from
+			voting
+		group by
+			application_rk, application_type_cd
+	) p
+	
+	left join
+		co e
+			on
+				e.application_rk = p.application_rk
+				and
+				e.application_type_cd = p.application_type_cd
+				and
+				e.dm_rn = 1
+				
+	left join
+		co rm
+			on
+				rm.application_rk = p.application_rk
+				and
+				rm.application_type_cd = p.application_type_cd
+				and
+				rm.rm_rn = 1
+) with data
+primary index (application_rk)
+;
+
+drop table application1;
+create table application1 as (
+select
+	a.agreement_rk as application_rk,
+	a.app_prt_type_cd as application_type_cd,
+	trunc(a.open_dt, 'mm') as generation,
+	a.source_system_cd as branch_id,
+	a.app_prt_id as application_id,
+	a.open_dt as application_dt,
+	coalesce(a.internal_org_2_rk, a.internal_org_rk) as pos_dept_rk,
+	coalesce(fxr.rate, 1.0) * a.app_prt_amt as application_amt,
+	a.product_operational_id as product_id,
+	trim(upper(po.link_qualifier_cd)) as qualifier_cd,
+	coalesce(p.subproduct_id, a.product_sub_id) as subproduct_id,
+	coalesce(po.product_operational_nm, p.product_nm) as product_nm,
+	coalesce(p.subproduct_nm, '') as subproduct_nm,
+	case
+		when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00172', '28,ВЛ,00022', '10,КР,00173') then 'Максимальный оборот'
+		when coalesce(p.subproduct_id, a.product_sub_id) in ('23,ОВ,00018') then 'Овердрафт ТОП50'
+  	when coalesce(p.subproduct_id, a.product_sub_id) in ('23,ОВ,00015') then 'Комплимент'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00114','10,КР,00115', '28,ВЛ,00015', '10,МЮ,00114','10,МЮ,00115', '28,ВЮ,00015') then 'Набирай обороты'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00091','10,КР,00103','10,КР,00107', '10,МЮ,00091') and a.open_dt between date '2015-04-20' and date '2016-04-30' then 'МСП - Надежный партнер'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00102', '10,МЮ,00102') and a.open_dt between date '2015-08-10' and date '2016-04-30' then 'МСП - Антикризис'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00104','10,КР,00105', '10,МЮ,00105') and  a.open_dt between date '2015-09-10' and date '2016-04-30' then 'МСП - Дальний Восток'
+                               
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00084', '10,КР,00085', '10,КР,00086', '28,ВЛ,00011') then 'Привилегия'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00061', '10,КР,00062', '10,КР,00063') then 'Новые возможности'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00013', '28,ВЮ,00013', '10,КР,00092', '10,КР,00093', '10,КР,00094', '10,КР,00095', '10,КР,00106', '10,МЮ,00092', '10,МЮ,00093', '10,МЮ,00094', '10,МЮ,00095', '10,МЮ,00106') then 'Новые возможности 2015'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00088') then 'Высокий сезон'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('23,ОВ,00012', '23,ОЮ,00012') then 'Летний сезон'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00112', '10,КР,00113', '28,ВЛ,00014', '23,ОВ,00014') then 'Рефинансирование БМ'
+
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00017', '28,ВЮ,00017', '10,КР,00123', '10,КР,00122', '10,МЮ,00123', '10,МЮ,00122', '23,ОВ,00016', '23,ОЮ,00016') then 'Промо 12x12 2016'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00005', '10,КР,00011') then 'Бизнес-Кредит 12'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00006', '10,КР,00012') then 'Бизнес-Кредит 24'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00006', '10,КР,00040') then 'Оборотный бизнес-кредит для клиентов ВТБ24'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00041') then 'Инвестиционный бизнес-кредит для клиентов ВТБ Промо'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('23,ОВ,00006') then 'Овердрафт для клиентов ВТБ Промо'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00009', '10,КР,00057','10,КР,00039') then 'Промо 10x10'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00013','10,КР,00014') then 'Промо 2x2'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00002','28,ВЛ,00003','10,КР,00034','10,КР,00035','10,КР,00032','10,КР,00033','10,КР,00019','10,КР,00018','10,КР,00017','23,ОВ,00004','23,ОВ,00005','23,ОВ,00002') then 'Партнер'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00016', '28,ВЮ,00016', '10,КР,00117', '10,КР,00116', '10,КР,00121', '10,КР,00120', '10,КР,00119', '10,КР,00118', '10,МЮ,00117', '10,МЮ,00116', '10,МЮ,00121', '10,МЮ,00120', '10,МЮ,00119', '10,МЮ,00118') then 'Новые условия 2016'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00064', '23,ОВ,00010') then 'Удачный старт'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00007', '10,КР,00047', '10,КР,00045', '10,КР,00046', '10,КР,00043', '10,КР,00044', '23,ОВ,00007') then 'СтАР'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('28,ВЛ,00004', '10,КР,00030', '10,КР,00031',  '10,КР,00027', '10,КР,00028', '10,КР,00029', '23,ОВ,00003') then 'ТКБ'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00020', '10,КР,00021') then 'Торговый - Оборотный'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00087') then 'Гарантия по госконтрактам'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00015') then 'Инвестиционный Промо'
+    when coalesce(p.subproduct_id, a.product_sub_id) in ('10,КР,00016') then 'Инвестиционный+  Промо'
+  	else 'б/п'
+  end as promo,
+
+  a.app_prt_status_cd as status,
+	a.effective_from_dttm as status_dt,
+  
+  a.contract_period as term,
+	
+	a.customer_rk,
+	a.customer_type_cd,
+	
+	a.login_id as employee_login
+from
+	dds.app_prt a
+	
+	left join
+		dds.product_operational po
+			on
+				po.product_operational_rk = a.product_operational_rk
+				and
+				po.effective_from_dttm <= current_date
+				and
+				po.effective_to_dttm >= current_date
+				and
+				po.deleted_flg = '0'
+				
+	left join
+		product p
+			on
+				p.product_rk = a.product_rk
+
+  left join
+    dds.fx_rate fxr
+      on
+        fxr.src_currency_rk = a.currency_rk
+        and
+    		fxr.fx_rate_type_cd = 'УЧЕТНЫЙ'
+        and
+        fxr.trg_currency_iso_id = '810'
+        and
+        fxr.fx_rate_dt = a.open_dt
+where
+	a.app_prt_type_cd = 'ЗАЯВКИ'
+	and
+	a.product_operational_id in ('КР', 'ОК', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'МБ', 'МК', 'РЦ', 'РЛ', 'РЮ', 'МЮ', 'ВЮ', 'ОЮ')
+	and
+	a.deleted_flg = '0'
+	and
+	a.effective_from_dttm <= current_date
+	and
+	a.effective_to_dttm >= current_date
+) with data
+primary index (application_rk)
+;
+
+drop table application;
+create table application as (
+select
+	a.*,
+	cu.customer_global_id,
+	cu.customer_full_nm as customer_nm,
+	cu.tax_payer_num as customer_tin,
+	
+	rch.agreement_rk,
+	rch.agreement_type_cd,
+	
+	pr.decision_dt,
+	pr.rm_fl,
+	pr.rm_list,
+	pr.dm_list,
+	
+	coalesce(lh.employee_full_nm, lh.employee_short_nm) as employee_nm
+from
+	application1 a
+					
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_rk = a.customer_rk
+				and
+				cu.customer_type_cd = a.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				cu.effective_from_dttm <= current_date
+				and
+				cu.effective_to_dttm >= current_date
+								
+	left join
+		dds.agreement_relationship_hist rch
+			on
+				rch.application_agreement_rk = a.application_rk
+				and
+				rch.application_app_prt_type_cd = 'ЗАЯВКИ'
+				and
+				rch.agreement_type_cd = 'КРЕДИТ'
+				and
+				rch.deleted_flg = '0'
+				and
+				rch.effective_from_dttm <= current_date
+				and
+				rch.effective_to_dttm >= current_date
+				
+	left join
+		protocol_result pr
+			on
+				pr.application_rk = a.application_rk
+				and
+				pr.application_type_cd = 'ЗАЯВКИ'
+				
+	left join
+		dds.login_hist lh
+			on
+				lh.login_id = a.employee_login
+				and
+				lh.source_system_cd = a.branch_id
+				and
+				lh.effective_from_dttm <= a.application_dt
+				and
+				lh.effective_to_dttm >= a.application_dt
+				and
+				lh.deleted_flg = '0'
+qualify
+	-- задвоение в dds.agreement_relationship_hist rch, application_agreement_rk = 107253380
+	row_number() over (partition by a.application_rk order by rch.kvit_id) = 1
+) with data
+primary index (application_rk, agreement_rk/*, agreement_type_cd*/)
+;
+drop table application1;
+
+drop table app_transaction;
+create table app_transaction as (
+	select
+		strategy_edition_num as ver,
+		strategy_edition_dt as ver_dt,
+		transaction_rk,
+		bis_application_agreement_rk as application_rk,
+		transaction_dttm as dttm,
+		product_operational_id as product_id,
+		app_prt_stage_cd as stage
+	from
+		dds.data_flow_log_nbsm
+	where
+		bis_app_prt_type_cd = 'ЗАЯВКИ'
+		and
+		app_prt_stage_cd in ('БКИРЕЗ', 'СКОРИНГ1', 'СКОРИНГ2')
+		and
+		product_operational_id in ('КР', 'ОВ', 'ВЛ', 'МБ', 'МЮ', 'ВЮ', 'ОЮ')
+		and
+		deleted_flg = '0'
+		--and
+		--strategy_edition_dt >= date '2016-03-14'
+		--and
+		--transaction_dttm >= date '2016-03-14'
+) with data
+primary index (transaction_rk);
+
+drop table app_hist_raw;
+create table app_hist_raw as (
+select hh.* from
+		app_transaction t
+					
+		join
+			dds.data_nbsm_hist hh
+				on
+					hh.transaction_rk = t.transaction_rk
+					and
+					current_date between hh.effective_from_dttm and hh.effective_to_dttm
+					and
+					hh.deleted_flg = '0'
+					
+					--and
+					--(
+					--hh.product_type_cd in ('04', '10', '11', '12', '13', '14', '16', '1000', '1001'/*,*/  /* Ипотека */ /*'06'*/)
+					--or
+					--hh.product_operational_id in ('ОВ', 'МБ', 'КР', 'ВЛ', 'МК'/*,*/ /* Ипотека */ /*'И1'*/, 'МЮ', 'ВЮ', 'ОЮ')
+					--)
+					
+					and
+					(	coalesce(
+							case when hh.finish_plan_dt <> date '1900-01-01' then hh.finish_plan_dt end,
+							case when hh.liability_finish_dt <> date '1900-01-01' then hh.liability_finish_dt end,
+							date '1900-01-01') = date '1900-01-01'
+						or
+							coalesce(
+							case when hh.finish_plan_dt <> date '1900-01-01' then hh.finish_plan_dt end,
+							case when hh.liability_finish_dt <> date '1900-01-01' then hh.liability_finish_dt end,
+							date '1900-01-01') >= t.dttm
+						or
+						(	coalesce(
+							case when hh.finish_plan_dt <> date '1900-01-01' then hh.finish_plan_dt end,
+							case when hh.liability_finish_dt <> date '1900-01-01' then hh.liability_finish_dt end,
+							date '1900-01-01') <> date '1900-01-01'
+							and
+							coalesce(
+							case when hh.finish_plan_dt <> date '1900-01-01' then hh.finish_plan_dt end,
+							case when hh.liability_finish_dt <> date '1900-01-01' then hh.liability_finish_dt end,
+							date '1900-01-01') <= t.dttm
+							and
+							months_between(
+								t.dttm,
+								coalesce(
+									case when hh.finish_plan_dt <> date '1900-01-01' then hh.finish_plan_dt end,
+									case when hh.liability_finish_dt <> date '1900-01-01' then hh.liability_finish_dt end,
+									date '1900-01-01')
+							) <= 60)
+					)
+	qualify
+		row_number() over (partition by t.transaction_rk, hh.finish_plan_dt, hh.credit_limit_amt, hh.account_open_dt, hh.currency_rk, case when hh.guarantee_flg = 'N' then 1 else 2 end  order by effective_from_dttm desc) = 1
+) with data
+primary index(transaction_rk)
+;
+
+drop table app_hist;
+create table app_hist as (	
+	select
+		t.transaction_rk,
+		case
+			when trim(hh.account_activity_type_cd) = 'O' and hh.delinquency_day_cnt = 0 and hh.delinquency_amt_nc = 0.00 and hh.liability_finish_dt <> date '1900-01-01' and hh.liability_finish_dt < t.dttm
+			then case when months_between(t.dttm, hh.liability_finish_dt) <= 1 then 'C 0..1' else 'C >1' end
+			when trim(hh.account_activity_type_cd) in ('O', 'A', 'R') or (trim(hh.account_activity_type_cd) = 'C' and liability_finish_dt = date '1900-01-01')
+			then trim(hh.account_activity_type_cd)
+			when trim(hh.account_activity_type_cd) = 'C' and hh.liability_finish_dt <> date '1900-01-01' and months_between(t.dttm, hh.liability_finish_dt) <= 1
+			then 'C 0..1'
+			when trim(hh.account_activity_type_cd) = 'C' and hh.liability_finish_dt <> date '1900-01-01' and months_between(t.dttm, hh.liability_finish_dt) > 1
+			then 'C >1'
+			else '*'
+		end as st,
+		case
+			when hh.product_operational_id in ('ОВ', 'МБ', 'КР', 'ВЛ', 'МК', 'И1')
+			then hh.product_operational_id
+			when hh.product_type_cd = '04'
+			then 'ЛЛ'
+			when hh.product_operational_id = 'МЮ' or hh.product_type_cd in ('10', '11', '12', '13', '14')
+			then 'КР'
+			when hh.product_type_cd = '16'
+			then 'МК'
+			when hh.product_operational_id = 'ВЮ' or hh.product_type_cd = '1000'
+			then 'ВЛ'
+			when hh.product_operational_id = 'ОЮ' or hh.product_type_cd = '1001'
+			then 'ОВ'
+			when hh.product_type_cd = '06'
+			then 'И1'
+			else coalesce(product_type_cd, hh.product_operational_id, -1)
+		end as prod,
+		case
+			when hh.ext_source_system_cd = '3'
+			then 'VTB24'
+			else 'EXT'
+		end as src,
+		case
+			when hh.delinquency_day_cnt > 90 then '90+'
+			when hh.delinquency_day_cnt > 60 then '61-90'
+			when hh.delinquency_day_cnt > 30 then '31-60'
+			when hh.delinquency_day_cnt > 0 then '1-30'
+			else '0'
+		end as cur,
+		hh.guarantee_flg as guarantee,
+		sum(	coalesce(hh.payment_delay_29_less_cnt, 0) + coalesce(hh.payment_delay_30_59_cnt, 0) + 
+					coalesce(hh.payment_delay_60_89_cnt, 0) + coalesce(hh.payment_delay_90_more_cnt, 0)) as d29,
+		sum(	coalesce(hh.payment_delay_30_59_cnt, 0) + 
+					coalesce(hh.payment_delay_60_89_cnt, 0) + coalesce(hh.payment_delay_90_more_cnt, 0)) as d3059,
+		sum(coalesce(hh.payment_delay_60_89_cnt, 0) + coalesce(hh.payment_delay_90_more_cnt, 0)) as d6089,
+		sum(coalesce(hh.payment_delay_90_more_cnt, 0)) as d90,
+		
+		sum(	coalesce(hh.payment_delay_29_less_180_cnt, 0) + coalesce(hh.payment_delay_30_59_180_cnt, 0) +
+					coalesce(hh.payment_delay_60_89_180_cnt, 0) + coalesce(hh.payment_delay_90_more_180_cnt, 0)) as d29_180,
+		sum(	coalesce(hh.payment_delay_30_59_180_cnt, 0) +
+					coalesce(hh.payment_delay_60_89_180_cnt, 0) + coalesce(hh.payment_delay_90_more_180_cnt, 0)) as d3059_180,
+		sum(coalesce(hh.payment_delay_60_89_180_cnt, 0) + coalesce(hh.payment_delay_90_more_180_cnt, 0)) as d6089_180,
+		sum(coalesce(hh.payment_delay_90_more_180_cnt, 0)) as d90_180,
+		
+		-- давность последнего кредита
+		min(case when cast(hh.transaction_dttm as date) >= hh.account_open_dt then cast(hh.transaction_dttm as date) - hh.account_open_dt else 999999 end) as relevance,
+		sum(case when
+					coalesce(hh.payment_delay_29_less_cnt, 0) = 0 and coalesce(hh.payment_delay_30_59_cnt, 0) = 0 and
+					coalesce(hh.payment_delay_60_89_cnt, 0) = 0 and coalesce(hh.payment_delay_90_more_cnt, 0) = 0 /*and
+					coalesce(hh.delinquency_day_cnt, 0) = 0 and coalesce(hh.delinquency_amt_nc, 0) = 0*/
+				then 1 else 0 end ) as good, -- количество без просрочек
+		sum(case when
+					coalesce(hh.payment_delay_29_less_180_cnt, 0) = 0 and coalesce(hh.payment_delay_30_59_180_cnt, 0) = 0 and
+					coalesce(hh.payment_delay_60_89_180_cnt, 0) = 0 and coalesce(hh.payment_delay_90_more_180_cnt, 0) = 0 and
+					coalesce(hh.delinquency_day_cnt, 0) = 0 and coalesce(hh.delinquency_amt_nc, 0) = 0
+				then 1 else 0 end ) as good_180,
+		count(*) as cnt
+	from
+		app_transaction t
+					
+		join
+			app_hist_raw hh
+				on
+					hh.transaction_rk = t.transaction_rk
+					and
+					(hh.product_type_cd <> '07' or coalesce(hh.credit_limit_amt, 0.00) > 0 or (coalesce(hh.payment_delay_29_less_cnt, 0) + coalesce(hh.payment_delay_30_59_cnt, 0) + 
+					coalesce(hh.payment_delay_60_89_cnt, 0) + coalesce(hh.payment_delay_90_more_cnt, 0)) > 0 or (coalesce(hh.payment_delay_29_less_180_cnt, 0) + coalesce(hh.payment_delay_30_59_180_cnt, 0) +
+					coalesce(hh.payment_delay_60_89_180_cnt, 0) + coalesce(hh.payment_delay_90_more_180_cnt, 0)) > 0)
+	group by t.transaction_rk, st, prod, src, cur, guarantee
+) with data
+primary index(transaction_rk);
+;
+
+drop table rate;
+create table rate as (
+select
+	agreement_rk, rate
+from
+	dds.agreement_rate_hist
+where
+	agreement_type_cd = 'КРЕДИТ'
+	and
+	deleted_flg = '0'
+	and
+	rate > 0
+qualify
+	row_number() over (partition by agreement_rk order by effective_from_dttm) = 1
+) with data
+primary index (agreement_rk)
+;
+
+/********
+ * ДОДЕЛАТЬ!
+ * Договора по фактической выдаче
+ * ******
+ */
+drop table contract;
+create table contract as (
+select
+	distinct
+	c.agreement_rk,
+	c.contract_type_cd as agreement_type_cd,
+	trunc(coalesce(c.migration_open_dt, c.issue_dt), 'mm') as generation,
+	c.source_system_cd as branch_id,
+	c.contract_id,
+	coalesce(c.init_internal_org_2_rk, c.init_internal_org_rk) as pos_dept_rk,
+	coalesce(sum(lim.credit_limit_amt*coalesce(fxr.rate, 1.0)) over (partition by c.agreement_rk, lim.start_dt), c.contract_amt*coalesce(fxr.rate, 1.0)) as contract_amt,
+	c.currency_rk,
+	coalesce(c.migration_open_dt, c.open_dt) as open_dt,
+	coalesce(c.migration_open_dt, c.issue_dt) as issue_dt,
+	case
+		when period_type = 'дней'
+		then c.contract_period
+		when c.contract_period is not null
+		then add_months(coalesce(c.migration_open_dt, c.issue_dt), c.contract_period) - coalesce(c.migration_open_dt, c.issue_dt)
+		when c.contract_period is null and close_plan_dt is not null
+		then close_plan_dt - coalesce(case when open_dt >= date '2005-01-01' then open_dt end, c.migration_open_dt, c.issue_dt)
+	end as term,
+	case when c.close_dt < current_date then c.close_dt else close_plan_dt end as close_dt, 
+	r.rate,
+	c.product_operational_id as product_id,
+	trim(upper(po.link_qualifier_cd)) as qualifier_cd,
+	coalesce(p.subproduct_id, c.product_sub_id) as subproduct_id,
+	coalesce(po.product_operational_nm, p.product_nm) as product_nm,
+	coalesce(p.subproduct_nm, '') as subproduct_nm,
+/********
+ * ДОДЕЛАТЬ!
+ * Назначение из NBSM (пример Рассказов А.)
+ * ******
+ */
+	c.purpose_cd as purpose,
+	case
+		when c.product_operational_id in ('ВЛ', 'МБ', 'ВЮ') then 'ВКЛ'
+		when c.product_operational_id in ('КР', 'МЮ') and case
+		when period_type = 'дней'
+		then c.contract_period
+		when c.contract_period is not null
+		then add_months(coalesce(c.migration_open_dt, c.issue_dt), c.contract_period) - coalesce(c.migration_open_dt, c.issue_dt)
+		when c.contract_period is null and close_plan_dt is not null
+		then close_plan_dt - coalesce(case when open_dt >= date '2005-01-01' then open_dt end, c.migration_open_dt, c.issue_dt)
+	end > 740 then 'ИНВЕСТ'
+		when c.product_operational_id in ('КР', 'МЮ') then 'ОБОР'
+		when c.product_operational_id in ('ОВ', 'ОЮ') then 'ОВЕР'
+		else c.product_operational_id
+	end as product,
+	case when coalesce(c.migration_open_dt, c.issue_dt) < date '2012-06-01' then 'н/д' when a.rm_fl = 1 or rm.rm_fl = 1 then 'ГО' else 'ЛСК' end as lvl,
+	
+	c.customer_rk,
+	c.customer_type_cd,
+	
+	cu.customer_global_id,
+	/*
+	cu.customer_full_nm as customer_nm,
+	cu.tax_payer_num as customer_tin,
+	*/
+	cxg.customer_global_rk as customer_mdm_rk,
+	coalesce(mdmcorp.organization_full_nm, '' || coalesce(mdmind.last_nm || ' ', '') || coalesce(mdmind.first_nm || ' ', '') || coalesce(mdmind.middle_nm, '')) as customer_nm,
+	coalesce(mdmcorp.tax_payer_num, mdmind.tax_payer_num) as customer_tin,
+	
+	--coalesce(oc.okved_code, substring(trim(both ',' from trim(ch.okved_cd)) from 0 for case when position(',' in trim(both ',' from trim(ch.okved_cd))) = 0 then length(trim(both ',' from trim(ch.okved_cd))) + 1 else position(',' in trim(both ',' from trim(ch.okved_cd))) end)) as okved_code,
+	coalesce(oc.okved_code, copract.economic_activity_info) as okved_code,
+	o.okved_desc
+from
+	dds.contract_ln c
+	
+	left join
+		cdm.tech_customer_x_global cxg
+			on
+				cxg.customer_global_type = 'MDM'
+				and
+				cxg.customer_rk = c.customer_rk
+				and
+				cxg.customer_type_cd = c.customer_type_cd
+				and
+				cxg.deleted_flg = '0'
+				and
+				current_date between cxg.effective_from_dttm and cxg.effective_to_dttm
+				
+	left join
+		dds.corporate_mdm_hist mdmcorp
+			on
+				mdmcorp.customer_rk = cxg.customer_global_rk
+				and
+				mdmcorp.deleted_flg = '0'
+				and
+				current_date between mdmcorp.effective_from_dttm and mdmcorp.effective_to_dttm
+				
+	left join
+		dds.individual_mdm_hist mdmind
+			on
+				mdmind.customer_rk = cxg.customer_global_rk
+				and
+				mdmind.deleted_flg = '0'
+				and
+				current_date between mdmind.effective_from_dttm and mdmind.effective_to_dttm
+	
+	left join
+		dds.agreement_credit_limit_hist lim
+			on
+				lim.agreement_rk = c.agreement_rk
+				and
+				lim.agreement_type_cd = c.contract_type_cd
+				and
+				lim.start_dt <= c.issue_dt
+				and
+				lim.effective_from_dttm <= current_date --c.issue_dt
+				and
+				lim.effective_to_dttm >= current_date --c.issue_dt
+				and
+				lim.deleted_flg = '0'
+				and
+				lim.is_active_flg = '1'
+
+	left join
+    dds.fx_rate fxr
+      on
+        fxr.src_currency_rk = c.currency_rk
+        and
+    		fxr.fx_rate_type_cd = 'УЧЕТНЫЙ'
+        and
+        fxr.trg_currency_iso_id = '810'
+        and
+        fxr.fx_rate_dt = c.issue_dt
+				
+	left join
+		rate r
+			on
+				r.agreement_rk = c.agreement_rk
+				
+	left join
+		dds.product_operational po
+			on
+				po.product_operational_rk = c.product_operational_rk
+				and
+				po.effective_from_dttm <= current_date
+				and
+				po.effective_to_dttm >= current_date
+				and
+				po.deleted_flg = '0'
+				
+	left join
+		product p
+			on
+				p.product_rk = c.product_rk
+
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_rk = c.customer_rk
+				and
+				cu.customer_type_cd = c.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				cu.effective_from_dttm <= current_date
+				and
+				cu.effective_to_dttm >= current_date
+/*
+	left join
+		dds.corporate_hist ch
+			on
+				ch.customer_rk = c.customer_rk
+				and
+				ch.customer_type_cd = c.customer_type_cd
+				and
+				ch.deleted_flg = '0'
+				and
+				ch.effective_from_dttm <= current_date
+				and
+				ch.effective_to_dttm >= current_date
+*/
+	
+	left join
+		tyurinaev.okved_corr oc
+			on
+				oc.customer_rk = c.customer_rk
+				and
+				oc.customer_type_cd = c.customer_type_cd
+				
+	left join
+		dds.corporate_activity_mdm_hist copract
+			on
+				copract.customer_rk = cxg.customer_global_rk
+				and
+				copract.deleted_flg = '0'
+				and
+				copract.primary_activity_flg = 'Y'
+				and
+				copract.qualifier_cd = '1' -- ОКВЭД
+				and
+				current_date between copract.effective_from_dttm and copract.effective_to_dttm
+				
+	left join
+		dds.dim_okved o
+			on
+				--o.okved_cd = coalesce(oc.okved_code, substring(trim(both ',' from trim(ch.okved_cd)) from 0 for case when position(',' in trim(both ',' from trim(ch.okved_cd))) = 0 then length(trim(both ',' from trim(ch.okved_cd))) + 1 else position(',' in trim(both ',' from trim(ch.okved_cd))) end))
+				o.okved_cd = coalesce(oc.okved_code, copract.economic_activity_info)
+				and
+				current_date between o.effective_from_dttm and o.effective_to_dttm
+				and
+				o.deleted_flg = '0'
+
+	left join
+		application a
+			on
+				a.agreement_rk = c.agreement_rk
+				and
+				a.agreement_type_cd = c.contract_type_cd
+				
+	left join
+		rm rm
+			on
+				rm.agreement_rk = c.agreement_rk
+where
+	c.contract_type_cd = 'КРЕДИТ'
+	and
+	c.contract_status_cd NOT IN ('АНКЛ', 'БВВД', 'БВВЗ', 'ВВЕД', 'ВВИВ', 'ВВРВ')
+	and
+	c.product_operational_id in ('КР', 'ОК', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'МБ', 'МК', 'РЦ', 'РЛ', 'РЮ', 'МЮ', 'ВЮ', 'ОЮ')
+	and
+	c.tranche_num is null
+	and
+	c.deleted_flg = '0'
+	
+	/* исключение Микрофинансового агенства
+	 * Договора
+	 * 721/1798-0000243
+	 * 721/1798-0000244
+	 * 723/1798-0000041
+	 *  */
+	--and
+	--not (c.source_system_cd = '00000' and c.contract_id in ('721/1798-0000243', '721/1798-0000244', '723/1798-0000041'))
+qualify
+	row_number() over (partition by c.agreement_rk order by lim.start_dt desc) = 1
+) with data
+primary index (agreement_rk)
+partition by(
+	case_n(
+		product_id = 'КР',
+		product_id = 'ОК',
+		product_id = 'ОВ',
+		product_id = 'ВЛ',
+		product_id = 'МН',
+		product_id = 'ПМ',
+		product_id = 'ПЭ',
+		product_id = 'ПЯ',
+		product_id = 'МБ',
+		product_id = 'МК',
+    product_id = 'РЦ',
+		product_id = 'РЛ',
+    product_id = 'РЮ',
+    product_id = 'МЮ',
+    product_id = 'ВЮ',
+    product_id = 'ОЮ'
+	)/*,
+	
+	range_n(
+		issue_dt between date '2000-01-01' and date '5999-12-31' each interval '1' month
+	)*/
+)
+;
+grant select on contract to ukoloviv;
+grant select on contract to SEMENOVSKIYRS;
+grant select on rm to SEMENOVSKIYRS;
+grant select on rm to DEKHTYAREVAI;
+grant select on contract to bukhtiyarovama;
+
+drop table contract_guarantee;
+create table contract_guarantee as (
+select
+	g.agreement_rk,
+	g.source_system_cd as branch_id,
+	substring (g.contract_id from 1 for index(g.contract_id, '^') - 1) as contract_id,
+	g.open_dt,
+	g.issue_dt,
+	g.close_plan_dt as close_dt,
+	g.contract_amt*coalesce(fxr.rate, 1.0) as contract_amt,
+	g.customer_rk,
+	cu.customer_global_id,
+	cu.customer_type_cd,
+	cu.customer_full_nm as customer_nm,
+	cu.tax_payer_num as customer_tin,
+	g.beneficiary_nm as beneficiar_nm,
+	g.init_internal_org_rk as pos_dept_rk
+from
+	cdm.cd_guarantee_agreement  g
+	
+	left join
+    dds.fx_rate fxr
+      on
+        fxr.src_currency_rk = g.currency_rk
+        and
+    		fxr.fx_rate_type_cd = 'УЧЕТНЫЙ'
+        and
+        fxr.trg_currency_iso_id = '810'
+        and
+        fxr.fx_rate_dt = g.issue_dt
+	
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_rk = g.customer_rk
+				and
+				cu.customer_type_cd = g.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				cu.effective_from_dttm <= current_date
+				and
+				cu.effective_to_dttm >= current_date
+where
+	g.deleted_flg = '0'
+	and
+	current_date between g.effective_from_dttm and g.effective_to_dttm
+) with data
+primary index (agreement_rk)
+;
+
+drop table affiliate_group;
+create table affiliate_group as (
+select
+	distinct
+	rd.report_dt, gh.parent_row_id as group_id	
+from
+	(	select
+			report_dt
+		from
+			report_date
+		union
+		select
+			distinct
+			issue_dt + 3 as report_dt
+		from
+			contract
+		union
+		select
+			distinct
+			open_dt + 3 as report_dt
+		from
+			contract_guarantee
+	) rd
+	
+	left join
+		affiliate af
+			on
+				1=1
+				
+	join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.customer_global_id = af.customer_global_id
+				and
+				gh.customer_type_cd = af.customer_type_cd
+				and
+				rd.report_dt between gh.effective_from_dttm and gh.effective_to_dttm
+				and
+				gh.deleted_flg = '0'
+) with data
+primary index (report_dt)
+;
+
+drop table customer_group_raw;
+create table customer_group_raw as (
+select
+	gl.report_dt, gl.group_id,
+	gh.customer_global_id,
+	gh.customer_type_cd,
+	c.agreement_rk,
+	c.product_operational_id as product_id,
+  coalesce(c.migration_open_dt, c.issue_dt) as issue_dt
+from
+	( select
+			distinct
+			rd.report_dt,
+			gh.parent_row_id as group_id
+		from
+			report_date rd
+		
+			join
+				contract c
+					on
+						c.issue_dt <= rd.report_dt
+						
+			join
+				dds.customer_connectd_debtors_hist gh
+					on
+						gh.customer_global_id = c.customer_global_id
+						and
+						gh.customer_type_cd = c.customer_type_cd
+						and
+						gh.effective_from_dttm <= rd.report_dt
+						and
+						gh.effective_to_dttm >= rd.report_dt
+						and
+						gh.deleted_flg = '0'
+						
+			left join
+				affiliate_group ag
+					on
+						ag.report_dt = rd.report_dt
+						and
+						ag.group_id = gh.parent_row_id
+		where
+			ag.group_id is null
+			
+						
+		union
+			
+		select
+		  distinct
+		  c.issue_dt + 3 as report_dt,
+		  gh.parent_row_id as group_id
+		from
+		  contract c
+		  
+		  join
+				dds.customer_connectd_debtors_hist gh
+					on
+						gh.customer_global_id = c.customer_global_id
+						and
+						gh.customer_type_cd = c.customer_type_cd
+						and
+						gh.effective_from_dttm <= c.issue_dt + 3
+						and
+						gh.effective_to_dttm >= c.issue_dt + 3
+						and
+						gh.deleted_flg = '0'
+						
+			left join
+				affiliate_group ag
+					on
+						ag.report_dt = c.issue_dt + 3
+						and
+						ag.group_id = gh.parent_row_id
+		where
+			ag.group_id is null
+	) gl
+	
+	join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.parent_row_id = gl.group_id
+				and
+				gh.effective_from_dttm <= gl.report_dt
+				and
+				gh.effective_to_dttm >= gl.report_dt
+				and
+				gh.deleted_flg = '0'
+				
+/******
+ * есть задвоения: клиенты с одним customer_global_id и customer_type_cd имеют разный customer_rk на одну дату
+ */
+				
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_global_id = gh.customer_global_id
+				and
+				cu.customer_type_cd = gh.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				cu.effective_from_dttm <= current_date
+				and
+				cu.effective_to_dttm >= current_date
+
+	join
+		dds.contract_ln c
+			on
+				c.customer_rk = cu.customer_rk 
+				and
+				c.customer_type_cd = cu.customer_type_cd
+				and
+				coalesce(c.migration_open_dt, c.issue_dt) <= gl.report_dt
+				and
+				c.contract_type_cd = 'КРЕДИТ'
+				and
+				c.tranche_num is null
+				and
+				c.deleted_flg = '0'	
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+drop table customer_group2_raw;
+create table customer_group2_raw as (
+select
+	cl.report_dt,
+	cl.customer_global_id,
+	cl.customer_type_cd,
+	c.agreement_rk,
+	c.product_operational_id as product_id,
+  coalesce(c.migration_open_dt, c.issue_dt) as issue_dt
+from
+	( select
+			distinct
+			rd.report_dt,
+			c.customer_global_id,
+			c.customer_type_cd
+		from
+			report_date rd
+		
+			join
+				contract c
+					on
+						c.issue_dt <= rd.report_dt
+						
+		union
+			
+		select
+		  distinct
+		  c.issue_dt + 3 as report_dt,
+		  c.customer_global_id,
+			c.customer_type_cd
+		from
+		  contract c
+	) cl
+	
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_global_id = cl.customer_global_id
+				and
+				cu.customer_type_cd = cl.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				cu.effective_from_dttm <= current_date
+				and
+				cu.effective_to_dttm >= current_date
+
+	join
+		dds.contract_ln c
+			on
+				c.customer_rk = cu.customer_rk 
+				and
+				c.customer_type_cd = cu.customer_type_cd
+				and
+				coalesce(c.migration_open_dt, c.issue_dt) <= cl.report_dt
+				and
+				c.contract_type_cd = 'КРЕДИТ'
+				and
+				c.tranche_num is null
+				and
+				c.deleted_flg = '0'	
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+
+drop table remains;
+create table remains as (
+select
+	cl.report_dt,
+	cl.agreement_rk,
+	sum(-ab.balance_amt_nc) as remains_rub
+from
+	(select distinct report_dt, agreement_rk from customer_group_raw
+	union	
+  select distinct report_dt, agreement_rk from customer_group2_raw
+	) cl
+	
+	join
+		dds.account_role_hist ar
+			on
+				ar.agreement_rk = cl.agreement_rk 
+				and
+				ar.effective_from_dttm <= cl.report_dt
+				and
+				ar.effective_to_dttm >= cl.report_dt
+				and
+				ar.deleted_flg = '0'
+				and
+				ar.account_role_cd = 'КРЕДН'
+				
+	join
+		dds.account_balance ab
+			on
+				ab.account_rk = ar.account_rk
+				and
+				ab.period_from_dttm <= cl.report_dt
+				and
+				ab.period_to_dttm >= cl.report_dt
+				and
+				ab.balance_amt_nc < 0
+group by
+	cl.report_dt,
+	cl.agreement_rk
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+
+drop table customer_group;
+create table customer_group as (
+select
+	cg.report_dt, cg.group_id,
+	cg.customer_global_id,
+	cg.customer_type_cd,
+	cg.agreement_rk,
+	cg.product_id,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	r.remains_rub
+from
+	customer_group_raw cg
+  /*
+  left join
+		contract c
+			on
+				c.agreement_rk = cg.agreement_rk
+  */
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = cg.agreement_rk
+				and
+				b.effective_from_dttm <= cg.report_dt
+				and
+				b.effective_to_dttm >= cg.report_dt
+				and
+				b.deleted_flg = '0'
+				
+	left join
+		remains r
+			on
+				r.report_dt = cg.report_dt
+				and
+				r.agreement_rk = cg.agreement_rk
+				
+where
+	(
+	(coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0)) > 0
+	or
+	r.remains_rub > 0
+	or
+	cg.report_dt = cg.issue_dt + 3
+	)
+) with data
+primary index (agreement_rk, report_dt)
+;
+drop table customer_group_raw;
+
+drop table customer_group2;
+create table customer_group2 as (
+select
+	cg.report_dt,
+	cg.customer_global_id,
+	cg.customer_type_cd,
+	cg.agreement_rk,
+	cg.product_id,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	r.remains_rub
+from
+	customer_group2_raw cg
+  /*
+  left join
+		contract c
+			on
+				c.agreement_rk = cg.agreement_rk
+  */
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = cg.agreement_rk
+				and
+				b.effective_from_dttm <= cg.report_dt
+				and
+				b.effective_to_dttm >= cg.report_dt
+				and
+				b.deleted_flg = '0'
+				
+	left join
+		remains r
+			on
+				r.report_dt = cg.report_dt
+				and
+				r.agreement_rk = cg.agreement_rk
+				
+where
+	(
+	(coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0)) > 0
+	or
+	r.remains_rub > 0
+	or
+	cg.report_dt = cg.issue_dt + 3
+	)
+) with data
+primary index (agreement_rk, report_dt)
+;
+drop table customer_group2_raw;
+
+grant select on customer_group to kistanovai;
+grant select on customer_group2 to kistanovai;
+
+
+drop table guarantee;
+create table guarantee as (
+select
+	cl.report_dt,
+	cl.agreement_rk,
+	sum(case when coalesce(g.tax_payer_num, '0000000000') = '7750005919' then guarantee_amt end) as amt_akg,
+	sum(case when coalesce(g.tax_payer_num, '0000000000') <> '7750005919' then guarantee_amt end) as amt_fund
+from
+	(
+		select rd.report_dt, c.agreement_rk
+		from report_date rd join contract c on c.issue_dt <= rd.report_dt
+		
+		union
+
+		select issue_dt + 3 as report_dt, agreement_rk  from contract
+
+		union
+
+		select issue_dt + 90 as report_dt, agreement_rk  from contract
+
+		union
+
+		select open_dt + 3 as report_dt, agreement_rk from contract_guarantee
+
+		union
+
+		select open_dt + 90 as report_dt, agreement_rk from contract_guarantee
+
+		union
+
+		select rd.report_dt, c.agreement_rk
+		from report_date rd join contract_guarantee c on c.open_dt <= rd.report_dt
+		) cl
+				
+	join
+		dds.agreement_guarantor_hist g
+			on
+				g.agreement_rk = cl.agreement_rk
+				and
+				g.effective_from_dttm <= cl.report_dt
+				and
+				g.effective_to_dttm >= cl.report_dt
+				and
+				g.deleted_flg = '0'
+				and
+				(g.ownership_pattern_cd = 'НО' or g.tax_payer_num in (select tin from fund) or g.tax_payer_num = '7750005919' /* АКГ */)
+	group by
+		cl.report_dt,
+		cl.agreement_rk
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+
+drop table pledge_cat;
+create table pledge_cat as (
+with
+	recursive cx (cat, typ, dsc) as (
+		select
+			case
+				when collateral_type_cd in ('3.2', '3.3')
+				then 'Товар'
+				when collateral_type_cd in ('3.4', '3.5', '3.6', '3.7')
+				then collateral_type_desc
+				when collateral_type_cd = '3.8'
+				then 'Жилая недвижимость'
+				else 'Прочее'
+			end as cat,
+			collateral_type_cd as typ,
+			collateral_type_desc as dsc
+		from
+			dds.dim_collateral_type
+		where
+			substr(collateral_type_cd, 1, 2) = '3.'
+			and
+			length(collateral_type_cd) = 3
+			and
+			deleted_flg = '0'
+			and
+			is_active_flg = '1'
+			
+		union all
+		
+		select
+			case
+				when c.collateral_type_cd like '3.1.0%'
+				then 'Депозит'
+				else cx.cat
+			end as cat,
+			c.collateral_type_cd as typ,
+			c.collateral_type_desc as dsc
+		from
+			cx
+			
+			join
+				dds.dim_collateral_type c
+					on
+						c.parent_collateral_type_cd = cx.typ
+						and
+						c.deleted_flg = '0'
+						and
+						c.is_active_flg = '1'
+	)
+select
+	*
+from
+	cx
+) with data
+primary index (typ)
+;
+
+drop table pledge;
+create table pledge as (
+select
+	report_dt, agreement_rk, pledge_cat,
+	sum(amt) as amt
+from
+	(
+	select
+		cl.report_dt,
+		cl.agreement_rk,
+		case when pc.cat is null then 'Прочее' else pc.cat end as pledge_cat,
+		pledge_amt*coalesce(fxr.rate, 1.0) as amt
+	from
+		(
+		select rd.report_dt, c.agreement_rk
+		from report_date rd join contract c on c.issue_dt <= rd.report_dt
+		
+		union
+
+		select issue_dt + 3 as report_dt, agreement_rk  from contract
+
+		union
+
+		select issue_dt + 90 as report_dt, agreement_rk  from contract
+
+		union
+
+		select open_dt + 3 as report_dt, agreement_rk from contract_guarantee
+		
+		union
+
+		select open_dt + 90 as report_dt, agreement_rk from contract_guarantee
+
+		union
+
+		select rd.report_dt, c.agreement_rk
+		from report_date rd join contract_guarantee c on c.open_dt <= rd.report_dt
+		) cl
+					
+		join
+			cdm.cd_pledge_agreement p
+				on
+					p.agreement_rk = cl.agreement_rk
+					and
+					cl.report_dt between p.pledge_open_dt and p.pledge_close_dt
+					and
+					cl.report_dt between p.effective_from_dttm and p.effective_to_dttm
+					and
+					p.deleted_flg = '0'
+					and
+					p.pledge_amt > 0
+	
+	  left join
+	    dds.fx_rate fxr
+	      on
+	        fxr.src_currency_rk = p.currency_rk
+	        and
+	    	fxr.fx_rate_type_cd = 'УЧЕТНЫЙ'
+	        and
+	        fxr.trg_currency_iso_id = '810'
+	        and
+	        fxr.fx_rate_dt = cl.report_dt
+					
+		left join
+			pledge_cat pc
+				on
+					pc.typ = p.collateral_type_cd
+	qualify
+		row_number() over (partition by cl.report_dt, cl.agreement_rk, p.pledge_agreement_id order by p.pledge_open_dt, p.effective_from_dttm) = 1
+	) p
+group by
+	report_dt, agreement_rk, pledge_cat
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+
+create table portfolio4 as (
+select
+	rd.report_dt,  
+	c.agreement_rk, c.agreement_type_cd, c.generation, c.contract_id, c.contract_amt, c.issue_dt,
+  c.lvl,
+	c.term, c.close_dt, c.rate,
+	c.product_id, c.subproduct_id, c.product_nm, c.subproduct_nm, c.product, c.purpose, c.customer_type_cd, c.customer_global_id,
+  c.customer_mdm_rk,
+	c.customer_nm, c.customer_tin,  
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	r.remains_rub,
+	c.okved_code, c.okved_desc,
+	c.pos_dept_rk
+from
+	report_date rd
+	
+	join
+		contract c
+			on
+				c.issue_dt <= rd.report_dt
+	
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = c.agreement_rk
+				and
+				b.effective_from_dttm <= rd.report_dt
+				and
+				b.effective_to_dttm >= rd.report_dt
+				and
+				b.deleted_flg = 0
+				
+	left join
+		remains r
+			on
+				r.report_dt = rd.report_dt
+				and
+				r.agreement_rk = c.agreement_rk
+where
+	--rd.report_dt >= date '2012-06-30'
+	--and
+	
+	(
+	(coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0)) > 0
+	or
+	r.remains_rub > 0
+	)
+) with data
+primary index (agreement_rk, pos_dept_rk)
+;
+
+create table portfolio3 as (
+select
+  pos.district,
+  pos.region,
+  pos.city,
+  pos.branch_id,
+  pos.branch_id || ' ' || pos.branch_nm as branch_name,
+  pos.office_id as roo_id,
+  pos.office_id || ' ' || pos.office_nm as roo_name,
+  pos.pos_id,
+  pos.pos_id || ' ' || pos.pos_nm as pos_name,
+  p.*
+from
+	portfolio4 p
+	
+	left join
+		pos pos
+			on	
+				pos.org_rk = p.pos_dept_rk
+) with data
+primary index (agreement_rk)
+;
+drop table portfolio4;
+
+create table portfolio2 as (
+select
+  p.*,
+  a.application_id, a.decision_dt, coalesce(a.rm_fl, rm.rm_fl) as rm_fl, a.rm_list, a.dm_list,
+  a.employee_login, a.employee_nm
+from
+	portfolio3 p
+					
+	left join
+		application a
+			on
+				a.agreement_rk = p.agreement_rk
+				and
+				a.agreement_type_cd = p.agreement_type_cd
+				
+	left join
+		rm rm
+			on
+				rm.agreement_rk = p.agreement_rk
+) with data
+primary index (agreement_rk, report_dt)
+;
+drop table portfolio3;
+
+--drop table portfolio1;
+create table portfolio1 as (
+select
+	p.*,
+	df.delinquency_start_dt as delinquency_fifo_dt,
+	case
+    when (p.report_dt - df.delinquency_start_dt) between 0 and 30
+    then '30'
+    when (p.report_dt - df.delinquency_start_dt) between 31 and 60
+    then '31-60'
+    when (p.report_dt - df.delinquency_start_dt) between 61 and 90
+    then '61-90'
+    when (p.report_dt - df.delinquency_start_dt) > 90
+    then '90+'
+  end as delinquency_fifo_class,
+	(p.report_dt - df.delinquency_start_dt) as delinquency_fifo_days,
+	months_between(trunc(df.delinquency_start_dt, 'mm'), trunc(p.issue_dt, 'mm')) as delinquency_fifo_age,
+	
+	dl.delinquency_start_dt as delinquency_lifo_dt,
+	case
+    when (p.report_dt - dl.delinquency_start_dt) between 0 and 30
+    then '30'
+    when (p.report_dt - dl.delinquency_start_dt) between 31 and 60
+    then '31-60'
+    when (p.report_dt - dl.delinquency_start_dt) between 61 and 90
+    then '61-90'
+    when (p.report_dt - dl.delinquency_start_dt) > 90
+    then '90+'
+  end as delinquency_lifo_class,
+  (p.report_dt - dl.delinquency_start_dt) as delinquency_lifo_days,
+	months_between(trunc(dl.delinquency_start_dt, 'mm'), trunc(p.issue_dt, 'mm')) as delinquency_lifo_age
+from
+	portfolio2 p
+	
+	left join
+		cdm.fct_delinquency df
+			on
+				df.agreement_rk = p.agreement_rk
+				and
+				df.delinquency_method_cd = 'FIFO'
+				and
+				df.delinquency_type_cd = 'PRI'
+				and
+				df.effective_from_dttm <= p.report_dt
+				and
+				df.effective_to_dttm >= p.report_dt
+				and
+				df.overdue_rur_amt > 0
+				and
+				df.deleted_flg = '0'
+				
+	left join
+		cdm.fct_delinquency dl
+			on
+				dl.agreement_rk = p.agreement_rk
+				and
+				dl.delinquency_method_cd = 'LIFO'
+				and
+				dl.delinquency_type_cd = 'PRI'
+				and
+				dl.effective_from_dttm <= p.report_dt
+				and
+				dl.effective_to_dttm >= p.report_dt
+				and
+				dl.overdue_rur_amt > 0
+				and
+				dl.deleted_flg = '0'
+) with data
+primary index (agreement_rk, report_dt)
+;
+drop table portfolio2;
+
+drop table vt_gd;
+create /*volatile*/ table vt_gd as (
+	select
+		report_dt, group_id,
+		coalesce(sum(debt_rub), 0) + coalesce(sum(remains_rub), 0) as debt_rub, 
+		coalesce(sum(case when product_id in ('КР', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'ПК', 'МБ', 'МК', 'МЮ', 'ВЮ', 'ОЮ') then debt_rub end), 0)
+		+ coalesce (sum(case when product_id in ('КР', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'ПК', 'МБ', 'МК', 'МЮ', 'ВЮ', 'ОЮ') then remains_rub end), 0) as sme_debt_rub
+	from
+		customer_group
+	group by report_dt, group_id
+) with data
+--on commit preserve rows
+;
+
+drop table vt_cud;
+create /*volatile*/ table vt_cud as (
+	select
+		report_dt, customer_global_id, customer_type_cd,
+		coalesce(sum(debt_rub), 0) + coalesce(sum(remains_rub), 0) as debt_rub, 
+		coalesce(sum(case when product_id in ('КР', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'ПК', 'МБ', 'МК', 'МЮ', 'ВЮ', 'ОЮ') then debt_rub end), 0)
+		+ coalesce (sum(case when product_id in ('КР', 'ОВ', 'ВЛ', 'МН', 'ПМ', 'ПЭ', 'ПЯ', 'ПК', 'МБ', 'МК', 'МЮ', 'ВЮ', 'ОЮ') then remains_rub end), 0) as sme_debt_rub
+	from
+		customer_group2
+	group by report_dt, customer_global_id, customer_type_cd
+) with data
+--on commit preserve rows
+;
+
+drop table issue_debt;
+create table issue_debt as (
+select
+	c.agreement_rk, igh.parent_row_id as group_id,
+	coalesce(icud.sme_debt_rub, c.contract_amt) as issue_customer_debt_sme_rub,	
+	case
+		when coalesce(igd.sme_debt_rub, icud.sme_debt_rub, c.contract_amt) >= 1000000000
+		then coalesce(icud.sme_debt_rub, c.contract_amt)
+		else coalesce(igd.sme_debt_rub, icud.sme_debt_rub, c.contract_amt)
+	end as issue_group_debt_sme_rub
+from
+	contract c
+	
+	left join
+		dds.customer_connectd_debtors_hist igh
+			on
+				igh.customer_global_id = c.customer_global_id
+				and
+				igh.customer_type_cd = c.customer_type_cd
+				and
+				igh.effective_from_dttm <= c.issue_dt + 3
+				and
+				igh.effective_to_dttm >= c.issue_dt + 3
+				and
+				igh.deleted_flg = '0'
+	
+	left join
+		vt_gd igd
+			on
+				igd.report_dt = c.issue_dt + 3
+				and
+				igd.group_id = igh.parent_row_id
+				and
+				igd.sme_debt_rub > 0
+
+	left join
+		vt_cud icud
+			on
+				icud.report_dt = c.issue_dt + 3
+				and
+				icud.customer_global_id = c.customer_global_id
+				and
+				icud.customer_type_cd = c.customer_type_cd
+				and
+				icud.sme_debt_rub > 0
+qualify
+	/* 
+	 * Пересечение  effective_from_dttm-effective_to_dttm в dds.customer_connectd_debtors_hist
+	 * например agreement_rk = 285313798 2013-12-14
+	 * 
+	 * */
+	row_number() over (partition by c.agreement_rk order by igh.effective_from_dttm desc) = 1
+) with data
+primary index(agreement_rk)
+;
+
+drop table portfolio;
+create table portfolio as (
+select
+	p.*,
+	coalesce(case when cud.debt_rub > 0 then cud.debt_rub end,
+		coalesce(p.debt_rub, 0) + coalesce(p.remains_rub, 0)
+	) as customer_debt_rub,
+	
+	coalesce(case when cud.sme_debt_rub > 0 then cud.sme_debt_rub end,
+		coalesce(p.debt_rub, 0) + coalesce(p.remains_rub, 0)
+	) as customer_debt_sme_rub,
+	
+	id.issue_customer_debt_sme_rub,
+	
+	gh.parent_row_id as group_id,
+	coalesce(case when gd.debt_rub > 0 then gd.debt_rub end, case when cud.debt_rub > 0 then cud.debt_rub end,
+		coalesce(p.debt_rub, 0) + coalesce(p.remains_rub, 0)
+	) as group_debt_rub,
+	
+	coalesce(case when gd.sme_debt_rub > 0 then gd.sme_debt_rub end, case when cud.sme_debt_rub > 0 then cud.sme_debt_rub end,
+		coalesce(p.debt_rub, 0) + coalesce(p.remains_rub, 0)
+	) as group_debt_sme_rub,
+	
+	id.issue_group_debt_sme_rub,
+	
+	pl_realty.amt as pl_realty_amt,
+	pl_comm_realty.amt as pl_comm_realty_amt,
+	pl_equipment.amt as pl_equipment_amt,
+	pl_goods.amt as pl_goods_amt,
+	pl_transport.amt as pl_transport_amt,
+	pl_others.amt as pl_others_amt,
+	
+	gua.amt_fund as guarantee_fund_amt,
+	gua.amt_akg as guarantee_akg_amt
+from
+	portfolio1 p
+
+	left join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.customer_global_id = p.customer_global_id
+				and
+				gh.customer_type_cd = p.customer_type_cd
+				and
+				gh.effective_from_dttm <= p.report_dt
+				and
+				gh.effective_to_dttm >= p.report_dt
+				and
+				gh.deleted_flg = '0'
+
+	left join
+		vt_gd gd
+			on
+				gd.report_dt = p.report_dt
+				and
+				gd.group_id = gh.parent_row_id
+
+	left join
+		vt_cud cud
+			on
+				cud.report_dt = p.report_dt
+				and
+				cud.customer_global_id = p.customer_global_id
+				and
+				cud.customer_type_cd = p.customer_type_cd
+
+	/****/
+	left join
+		issue_debt id
+			on
+				id.agreement_rk = p.agreement_rk
+	/****/
+
+	left join
+		pledge pl_realty
+			on
+				pl_realty.report_dt = p.report_dt
+				and
+				pl_realty.agreement_rk = p.agreement_rk
+				and
+				pl_realty.pledge_cat = 'Жилая недвижимость'
+
+	left join
+		pledge pl_comm_realty
+			on
+				pl_comm_realty.report_dt = p.report_dt
+				and
+				pl_comm_realty.agreement_rk = p.agreement_rk
+				and
+				pl_comm_realty.pledge_cat = 'Коммерческая и производственная недвижимость'
+
+	left join
+		pledge pl_equipment
+			on
+				pl_equipment.report_dt = p.report_dt
+				and
+				pl_equipment.agreement_rk = p.agreement_rk
+				and
+				pl_equipment.pledge_cat = 'Оборудование'
+
+	left join
+		pledge pl_goods
+			on
+				pl_goods.report_dt = p.report_dt
+				and
+				pl_goods.agreement_rk = p.agreement_rk
+				and
+				pl_goods.pledge_cat = 'Товар'
+
+	left join
+		pledge pl_transport
+			on
+				pl_transport.report_dt = p.report_dt
+				and
+				pl_transport.agreement_rk = p.agreement_rk
+				and
+				pl_transport.pledge_cat = 'Транспортные средства'
+
+	left join
+		pledge pl_others
+			on
+				pl_others.report_dt = p.report_dt
+				and
+				pl_others.agreement_rk = p.agreement_rk
+				and
+				pl_others.pledge_cat = 'Прочее'
+
+	left join
+		guarantee gua
+			on
+				gua.report_dt = p.report_dt
+				and
+				gua.agreement_rk = p.agreement_rk
+qualify
+	/* 
+	 * Пересечение  effective_from_dttm-effective_to_dttm в dds.customer_connectd_debtors_hist
+	 * например agreement_rk = 285313798 2013-12-14
+	 * 
+	 * */
+	row_number() over (partition by p.report_dt, p.agreement_rk order by gh.effective_from_dttm desc) = 1
+) with data
+primary index (agreement_rk, report_dt)
+;
+drop table portfolio1;
+drop table vt_gd;
+drop table vt_cud;
+
+
+drop table delinquency_lifo;
+create table delinquency_lifo as (
+select
+	d.*,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub
+from
+	( select
+		  distinct
+		  agreement_rk,
+		  min(start_dt) over (partition by agreement_rk, delinquency_no order by start_dt rows between unbounded preceding and unbounded following) as start_dt,
+		  max(stop_dt) over (partition by agreement_rk, delinquency_no order by start_dt rows between unbounded preceding and unbounded following) as stop_dt
+		from
+			( select
+			    d.*,
+			    sum(start_fl) over (partition by agreement_rk order by effective_from_dttm rows between unbounded preceding and current row ) as delinquency_no
+			  from
+			  ( select
+				  	d.*,
+				  	case
+			        when
+			        	min(stop_dt) over (partition by agreement_rk order by start_dt, effective_from_dttm rows between 1 preceding and 1 preceding) <= start_dt
+			          or
+			          min(stop_dt) over (partition by agreement_rk order by start_dt, effective_from_dttm rows between 1 preceding and 1 preceding) is null
+			        then 1
+			      end as start_fl
+				  from
+				  ( select
+					    agreement_rk, start_dt, overdue_rur_amt, effective_from_dttm,
+					    min(stop_dt) over (partition by agreement_rk, start_dt) as stop_dt
+					  from
+					  ( select
+					      agreement_rk, start_dt, overdue_rur_amt, effective_from_dttm,
+								case
+									when stop_dt is null and min(start_dt) over (partition by agreement_rk order by start_dt, effective_from_dttm rows between 1 following and 1 following) > stop_dt2
+		              then stop_dt2
+									else stop_dt
+								end as stop_dt
+					      
+					    from
+					    ( select
+					        distinct
+					        c.agreement_rk, d.delinquency_start_dt as start_dt, d.overdue_rur_amt,
+					        min(case when d.overdue_rur_amt = 0 then d.effective_from_dttm end) over (
+					          partition by c.agreement_rk, d.delinquency_start_dt
+					        ) as stop_dt,
+		              max(effective_to_dttm)  over (
+					          partition by c.agreement_rk, delinquency_start_dt
+					        ) as stop_dt2,
+					        d.effective_from_dttm
+					      from
+					        contract c
+					        join
+										cdm.fct_delinquency d
+											on
+												d.agreement_rk = c.agreement_rk
+												and
+												d.delinquency_method_cd = 'LIFO'
+												and
+												d.delinquency_type_cd = 'PRI'
+												and
+												d.deleted_flg = '0'
+					    ) d
+					  ) d
+					)d
+				) d
+			) d
+	) d
+	
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= d.start_dt
+				and
+				b.effective_to_dttm >= d.start_dt
+				and
+				b.deleted_flg = '0'
+		
+) with data
+primary index (agreement_rk)
+;
+
+/*
+select * from cdm.fct_delinquency d where d.agreement_rk = 10425061 and
+							d.delinquency_method_cd = 'FIFO'
+							and
+							d.delinquency_type_cd = 'PRI'
+							and
+							d.deleted_flg = 0;
+
+select * from contract where contract_id = '721/2498-0000419';
+*/
+
+
+
+drop table delinquency_fifo;
+create table delinquency_fifo as (
+select
+	d.agreement_rk, d.start_dt,
+	case when d.stop_dt > current_date then null else d.stop_dt end as stop_dt,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub
+from
+	( select
+			c.agreement_rk, d.delinquency_start_dt as start_dt,
+			cast(d.effective_to_dttm + interval '1' second as date) as stop_dt 
+			--cast (
+			--	case when d.overdue_rur_amt = 0 then d.effective_from_dttm else d.effective_to_dttm/*+ interval '1' second*/ end
+			    	--as date) as stop_dt
+		from
+			contract c
+			join
+				cdm.fct_delinquency d
+					on
+						d.agreement_rk = c.agreement_rk
+						and
+						d.delinquency_method_cd = 'FIFO'
+						and
+						d.delinquency_type_cd = 'PRI'
+						and
+						d.deleted_flg = '0'
+						and
+						d.overdue_rur_amt > 0
+		qualify
+			row_number() over (partition by c.agreement_rk, d.delinquency_start_dt order by d.effective_to_dttm desc) = 1
+	) d 
+	
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= d.start_dt
+				and
+				b.effective_to_dttm >= d.start_dt
+				and
+				b.deleted_flg = '0'
+		
+) with data
+primary index (agreement_rk)
+;
+
+drop table delinquency_fifo2;
+create table delinquency_fifo2 as (
+with 
+	params(delinquency_days) as
+  ( select 0 from dua
+  	union all
+    select 7 from dua
+    union all
+    select 31 from dua
+    union all
+    select 61 from dua
+    union all
+    select 91 from dua
+  )
+select
+
+	d.agreement_rk,
+	p.delinquency_days,
+	d.start_dt, d.stop_dt,
+	d.start_dt + p.delinquency_days as delinquency_dt,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	coalesce(b.overdue_pri_balance_rur_amt, 0) as overdue_rub
+from
+	params p
+	
+	join
+		(select max(report_dt) as report_dt from report_date) rd
+			on
+				rd.report_dt = rd.report_dt
+	
+	join
+		delinquency_fifo d
+			on
+				coalesce(d.stop_dt - 1, rd.report_dt) - d.start_dt >= p.delinquency_days
+				
+	join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= (d.start_dt + p.delinquency_days)
+				and
+				b.effective_to_dttm >= (d.start_dt + p.delinquency_days)
+				and
+				b.deleted_flg = '0'
+
+) with data
+primary index (agreement_rk, delinquency_days)
+;
+
+
+drop table delinquency_lifo2;
+create table delinquency_lifo2 as (
+with 
+	params(delinquency_days) as
+  ( select 0 from dua
+    union all
+    select 31 from dua
+    union all
+    select 61 from dua
+    union all
+    select 91 from dua
+  )
+select
+
+	d.agreement_rk,
+	p.delinquency_days,
+	d.start_dt, d.stop_dt,
+	d.start_dt + p.delinquency_days as delinquency_dt,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	coalesce(b.overdue_pri_balance_rur_amt, 0) as overdue_rub
+from
+	params p
+	
+	join
+		(select max(report_dt) as report_dt from report_date) rd
+			on
+				rd.report_dt = rd.report_dt
+	
+	join
+		delinquency_lifo d
+			on
+				coalesce(d.stop_dt - interval '1' day, rd.report_dt) - d.start_dt >= p.delinquency_days
+				
+	join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= d.start_dt + p.delinquency_days
+				and
+				b.effective_to_dttm >= d.start_dt + p.delinquency_days
+				and
+				b.deleted_flg = '0'
+
+) with data
+primary index (agreement_rk, delinquency_days)
+;
+
+drop table delinquency_fifo_agg;
+create table delinquency_fifo_agg as (
+select
+	d.agreement_rk, d.start_dt,
+	case when d.stop_dt > current_date then null else d.stop_dt end as stop_dt,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub
+from
+	( select
+			c.agreement_rk, d.delinquency_start_dt as start_dt,
+			cast(d.effective_to_dttm + interval '1' second as date) as stop_dt 
+		from
+			contract c
+			join
+				cdm.fct_delinquency d
+					on
+						d.agreement_rk = c.agreement_rk
+						and
+						d.delinquency_method_cd = 'FIFO'
+						and
+						d.delinquency_type_cd = 'AGG'
+						and
+						d.deleted_flg = '0'
+						and
+						d.overdue_rur_amt > 0
+		qualify
+			row_number() over (partition by c.agreement_rk, d.delinquency_start_dt order by d.effective_to_dttm desc) = 1
+	) d 
+	
+	left join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= d.start_dt
+				and
+				b.effective_to_dttm >= d.start_dt
+				and
+				b.deleted_flg = '0'
+) with data
+primary index (agreement_rk)
+;
+
+drop table delinquency_fifo_agg2;
+create table delinquency_fifo_agg2 as (
+with 
+	params(delinquency_days) as
+  ( select 0 from dua
+  	union all
+    select 7 from dua
+    union all
+    select 31 from dua
+    union all
+    select 61 from dua
+    union all
+    select 91 from dua
+  )
+select
+
+	d.agreement_rk,
+	p.delinquency_days,
+	d.start_dt, d.stop_dt,
+	d.start_dt + p.delinquency_days as delinquency_dt,
+	coalesce(b.pri_balance_rur_amt, 0) + coalesce(b.overdue_pri_balance_rur_amt, 0) as debt_rub,
+	coalesce(b.overdue_pri_balance_rur_amt, 0) as overdue_rub
+from
+	params p
+	
+	join
+		(select max(report_dt) as report_dt from report_date) rd
+			on
+				rd.report_dt = rd.report_dt
+	
+	join
+		delinquency_fifo_agg d
+			on
+				coalesce(d.stop_dt - 1, rd.report_dt) - d.start_dt >= p.delinquency_days
+				
+	join
+		cdm.fct_loan_balance b
+			on
+				b.agreement_rk = d.agreement_rk
+				and
+				b.effective_from_dttm <= (d.start_dt + p.delinquency_days)
+				and
+				b.effective_to_dttm >= (d.start_dt + p.delinquency_days)
+				and
+				b.deleted_flg = '0'
+
+) with data
+primary index (agreement_rk, delinquency_days)
+;
+
+
+/********
+ * Повторные кредиты (с учетом группы)
+ * ******
+ */
+drop table recredit;
+create table recredit as (
+select
+	distinct
+	agreement_rk
+from
+	( select
+			cg.*,
+			max(
+			case
+				when
+					c.issue_dt <= cg.report_dt and (c.close_dt is null or c.close_dt >= add_months(cg.report_dt, -24)) and
+					(case when c.close_dt is null or c.close_dt > cg.report_dt then cg.report_dt else c.close_dt end -
+					case when c.issue_dt < add_months(cg.report_dt, -24) then add_months(cg.report_dt, -24) else c.issue_dt end >= 365) 
+				then 1
+			end) over (partition by cg.group_id, cg.report_dt) as repeat_fl,
+			
+			case
+				when
+					c.issue_dt + 3 = cg.report_dt
+				then 1
+			end as head_fl
+		from
+			customer_group cg
+			
+			join
+				contract c
+					on
+						cg.agreement_rk = c.agreement_rk
+		where
+			cg.product_id in ('КР', 'ОВ', 'ВЛ', 'МБ', 'МЮ', 'ВЮ', 'ОЮ')
+	) g
+where
+	repeat_fl = 1
+	and
+	head_fl = 1
+	
+union
+
+select
+	distinct
+	agreement_rk
+from
+	( select
+			cg.*,
+			max(
+			case
+				when
+					c.issue_dt <= cg.report_dt and (c.close_dt is null or c.close_dt >= add_months(cg.report_dt, -24)) and
+					(case when c.close_dt is null or c.close_dt > cg.report_dt then cg.report_dt else c.close_dt end -
+					case when c.issue_dt < add_months(cg.report_dt, -24) then add_months(cg.report_dt, -24) else c.issue_dt end >= 365)
+				then 1
+			end) over (partition by cg.customer_global_id, cg.customer_type_cd, cg.report_dt) as repeat_fl,
+			
+			case
+				when
+					c.issue_dt + 3 = cg.report_dt
+				then 1
+			end as head_fl
+		from
+			customer_group2 cg
+			
+			join
+				contract c
+					on
+						cg.agreement_rk = c.agreement_rk
+		where
+			cg.product_id in ('КР', 'ОВ', 'ВЛ', 'МБ', 'МЮ', 'ВЮ', 'ОЮ')
+	) g
+where
+	repeat_fl = 1
+	and
+	head_fl = 1
+) with data
+primary index(agreement_rk)
+;
+
+
+drop table issue_pl;
+create table issue_pl as (
+	select
+			c.agreement_rk,
+			coalesce(case when sum(pri.amt) > 0 then sum(pri.amt) else sum(pr3.amt) end, 0.0) as pl_realty,
+			coalesce(sum(pd.amt), 0.0) as pl_deposit,
+			coalesce(sum(pe.amt), 0.0) as pl_equipment,
+			coalesce(sum(pg.amt), 0.0) as pl_goods,
+			coalesce(sum(pt.amt), 0.0) as pl_transport,
+			coalesce(sum(po.amt), 0.0) as pl_others,
+			coalesce(case when sum(g.amt_fund) > 0 then sum(g.amt_fund) else sum(g3.amt_fund) end, 0.0) as guarantee_fund,
+			coalesce(case when sum(g.amt_akg) > 0 then sum(g.amt_akg) else sum(g3.amt_akg) end, 0.0) as guarantee_akg
+	from
+		(	select issue_dt + 3 as report_dt, issue_dt + 90 as report_dt3, agreement_rk from contract
+			union
+			select open_dt + 3 as report_dt, open_dt + 90 as report_dt3, agreement_rk from contract_guarantee
+		) c
+		
+		left join
+			pledge pri
+				on
+					pri.agreement_rk = c.agreement_rk
+					and
+					pri.pledge_cat in ('Жилая недвижимость', 'Коммерческая и производственная недвижимость')
+					and
+					pri.report_dt = c.report_dt
+					
+		left join
+			pledge pr3
+				on
+					pr3.agreement_rk = c.agreement_rk
+					and
+					pr3.pledge_cat in ('Жилая недвижимость', 'Коммерческая и производственная недвижимость')
+					and
+					pr3.report_dt = c.report_dt3
+					
+		left join
+			pledge pd
+				on
+					pd.agreement_rk = c.agreement_rk
+					and
+					pd.pledge_cat in ('Депозит')
+					and
+					pd.report_dt = c.report_dt
+					
+		left join
+			pledge pe
+				on
+					pe.agreement_rk = c.agreement_rk
+					and
+					pe.pledge_cat in ('Оборудование')
+					and
+					pe.report_dt = c.report_dt
+					
+		left join
+			pledge pg
+				on
+					pg.agreement_rk = c.agreement_rk
+					and
+					pg.pledge_cat in ('Товар')
+					and
+					pg.report_dt = c.report_dt
+					
+		left join
+			pledge pt
+				on
+					pt.agreement_rk = c.agreement_rk
+					and
+					pt.pledge_cat in ('Транспортные средства')
+					and
+					pt.report_dt = c.report_dt
+					
+					
+		left join
+			pledge po
+				on
+					po.agreement_rk = c.agreement_rk
+					and
+					po.pledge_cat in ('Прочее')
+					and
+					po.report_dt = c.report_dt
+					
+		left join
+			guarantee g
+				on
+					g.agreement_rk = c.agreement_rk
+					and
+					g.report_dt = c.report_dt
+
+		left join
+			guarantee g3
+				on
+					g3.agreement_rk = c.agreement_rk
+					and
+					g3.report_dt = c.report_dt3
+		group by
+			c.agreement_rk
+		having
+			sum(pri.amt) > 0
+			or
+			sum(pr3.amt) > 0
+			or
+			sum(pd.amt) > 0
+			or
+			sum(pe.amt) > 0
+			or
+			sum(pg.amt) > 0
+			or
+			sum(pt.amt) > 0
+			or
+			sum(po.amt) > 0
+			or
+			sum(g.amt_fund) > 0
+			or
+			sum(g.amt_akg) > 0
+			or
+			sum(g3.amt_fund) > 0
+			or
+			sum(g3.amt_akg) > 0
+) with data
+primary index (agreement_rk)
+;
+
+
+drop table guarantee_customer_group;
+create table guarantee_customer_group as (
+select
+	gl.report_dt, gl.group_id,
+	gh.customer_global_id,
+	gh.customer_type_cd,
+	c.agreement_rk,
+	coalesce(-b.balance_amt_nc, 0) as debt_rub
+from
+	( select
+			distinct
+			rd.report_dt,
+			gh.parent_row_id as group_id
+		from
+			report_date rd
+		
+			join
+				contract_guarantee c
+					on
+						c.open_dt <= rd.report_dt
+						
+			join
+				dds.customer_connectd_debtors_hist gh
+					on
+						gh.customer_global_id = c.customer_global_id
+						and
+						gh.customer_type_cd = c.customer_type_cd
+						and
+						gh.effective_from_dttm <= rd.report_dt
+						and
+						gh.effective_to_dttm >= rd.report_dt
+						and
+						gh.deleted_flg = '0'
+						
+			left join
+				affiliate_group ag
+					on
+						ag.report_dt = rd.report_dt
+						and
+						ag.group_id = gh.parent_row_id
+		where
+			ag.group_id is null
+						
+		union
+			
+		select
+		  distinct
+		  c.open_dt + 3 as report_dt,
+		  gh.parent_row_id as group_id
+		from
+		  contract_guarantee c
+		  
+		  join
+				dds.customer_connectd_debtors_hist gh
+					on
+						gh.customer_global_id = c.customer_global_id
+						and
+						gh.customer_type_cd = c.customer_type_cd
+						and
+						gh.effective_from_dttm <= c.open_dt + 3
+						and
+						gh.effective_to_dttm >= c.open_dt + 3
+						and
+						gh.deleted_flg = '0'
+						
+			left join
+				affiliate_group ag
+					on
+						ag.report_dt = c.open_dt + 3
+						and
+						ag.group_id = gh.parent_row_id
+		where
+			ag.group_id is null
+	) gl
+	
+	join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.parent_row_id = gl.group_id
+				and
+				gh.effective_from_dttm <= gl.report_dt
+				and
+				gh.effective_to_dttm >= gl.report_dt
+				and
+				gh.deleted_flg = '0'
+				
+	left join
+		dds.customer_global_registry cu
+			on
+				cu.customer_global_id = gh.customer_global_id
+				and
+				cu.customer_type_cd = gh.customer_type_cd
+				and
+				cu.deleted_flg = '0'
+				and
+				current_date between cu.effective_from_dttm and cu.effective_to_dttm
+				
+	join
+		contract_guarantee c
+			on
+				c.customer_rk = cu.customer_rk 
+				and
+				c.customer_type_cd = cu.customer_type_cd
+				and
+				c.open_dt <= gl.report_dt
+				
+	join
+		dds.account_role_hist ar
+			on
+				ar.agreement_rk = c.agreement_rk
+				and
+				ar.account_role_cd = 'КРЕДГАРАНТ'
+				and
+				ar.deleted_flg = '0'
+				and
+				gl.report_dt between ar.effective_from_dttm and ar.effective_to_dttm
+				
+	join
+		dds.account_balance b
+			on
+			b.account_rk = ar.account_rk
+			and
+			gl.report_dt between b.period_from_dttm and b.period_to_dttm
+			and
+			b.balance_amt_nc < 0
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+drop table guarantee_customer_group2;
+create table guarantee_customer_group2 as (
+select
+	cl.report_dt,
+	c.customer_global_id,
+	c.customer_type_cd,
+	c.agreement_rk,
+	coalesce(-b.balance_amt_nc, 0) as debt_rub
+from
+	( select
+			distinct
+			rd.report_dt,
+			c.customer_rk, c.customer_type_cd
+		from
+			report_date rd
+		
+			join
+				contract_guarantee c
+					on
+						c.open_dt <= rd.report_dt
+						
+		union
+			
+		select
+		  distinct
+		  c.open_dt + 3 as report_dt,
+		  c.customer_rk, c.customer_type_cd
+		from
+		  contract_guarantee c
+	) cl
+					
+	join
+		contract_guarantee c
+			on
+				c.customer_rk = cl.customer_rk 
+				and
+				c.customer_type_cd = cl.customer_type_cd
+				and
+				c.open_dt <= cl.report_dt
+				
+	join
+		dds.account_role_hist ar
+			on
+				ar.agreement_rk = c.agreement_rk
+				and
+				ar.account_role_cd = 'КРЕДГАРАНТ'
+				and
+				ar.deleted_flg = '0'
+				and
+				cl.report_dt between ar.effective_from_dttm and ar.effective_to_dttm
+				
+	join
+		dds.account_balance b
+			on
+			b.account_rk = ar.account_rk
+			and
+			cl.report_dt between b.period_from_dttm and b.period_to_dttm
+			and
+			b.balance_amt_nc < 0
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+drop table vt_gd;
+create volatile table vt_gd as (
+	select
+		report_dt, group_id,
+		sum(debt_rub) as debt_rub 
+	from
+		guarantee_customer_group
+	group by report_dt, group_id
+) with data
+on commit preserve rows
+;
+
+drop table vt_cud;
+create volatile table vt_cud as (
+	select
+		report_dt, customer_global_id, customer_type_cd,
+		sum(debt_rub) as debt_rub
+	from
+		guarantee_customer_group2
+	group by report_dt, customer_global_id, customer_type_cd
+) with data
+on commit preserve rows
+;
+
+drop table portfolio_guarantee;
+create table portfolio_guarantee as (
+select
+	rd.report_dt,
+	c.agreement_rk, c.contract_id, c.open_dt, c.close_dt,
+	coalesce(c.contract_amt, -b.balance_amt_nc) as contract_amt,
+	c.customer_global_id, c.customer_type_cd, c.customer_nm, c.customer_tin,
+	c.beneficiar_nm,
+	gh.parent_row_id as group_id,
+	coalesce(case when cud.debt_rub > 0 then cud.debt_rub end, c.contract_amt, -b.balance_amt_nc) as customer_debt_rub,
+	coalesce(case when gd.debt_rub > 0 then gd.debt_rub end, case when cud.debt_rub > 0 then cud.debt_rub end, c.contract_amt, -b.balance_amt_nc) as group_debt_rub,
+	pl_realty.amt as pl_realty_amt,
+	pl_comm_realty.amt as pl_comm_realty_amt,
+	pl_equipment.amt as pl_equipment_amt,
+	pl_goods.amt as pl_goods_amt,
+	pl_transport.amt as pl_transport_amt,
+	pl_others.amt as pl_others_amt,
+	
+	gua.amt_fund as guarantee_fund_amt,
+	gua.amt_akg as guarantee_akg_amt
+from
+	report_date rd
+	
+	join
+		contract_guarantee c
+			on
+				c.open_dt <= rd.report_dt
+			
+	join
+		dds.account_role_hist ar
+			on
+				ar.agreement_rk = c.agreement_rk
+				and
+				ar.account_role_cd = 'КРЕДГАРАНТ'
+				and
+				ar.deleted_flg = '0'
+				and
+				current_date between ar.effective_from_dttm and ar.effective_to_dttm
+				
+	join
+		dds.account_balance b
+			on
+			b.account_rk = ar.account_rk
+			and
+			rd.report_dt between b.period_from_dttm and b.period_to_dttm
+			and
+			b.balance_amt_nc < 0
+			
+	left join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.customer_global_id = c.customer_global_id
+				and
+				gh.customer_type_cd = c.customer_type_cd
+				and
+				rd.report_dt between gh.effective_from_dttm and gh.effective_to_dttm
+				and
+				gh.deleted_flg = '0'
+				
+	left join
+		vt_gd gd
+			on
+				gd.report_dt = rd.report_dt
+				and
+				gd.group_id = gh.parent_row_id
+
+	left join
+		vt_cud cud
+			on
+				cud.report_dt = rd.report_dt
+				and
+				cud.customer_global_id = c.customer_global_id
+				and
+				cud.customer_type_cd = c.customer_type_cd
+
+	left join
+		pledge pl_realty
+			on
+				pl_realty.report_dt = rd.report_dt
+				and
+				pl_realty.agreement_rk = c.agreement_rk
+				and
+				pl_realty.pledge_cat = 'Жилая недвижимость'
+
+	left join
+		pledge pl_comm_realty
+			on
+				pl_comm_realty.report_dt = rd.report_dt
+				and
+				pl_comm_realty.agreement_rk = c.agreement_rk
+				and
+				pl_comm_realty.pledge_cat = 'Коммерческая и производственная недвижимость'
+
+	left join
+		pledge pl_equipment
+			on
+				pl_equipment.report_dt = rd.report_dt
+				and
+				pl_equipment.agreement_rk = c.agreement_rk
+				and
+				pl_equipment.pledge_cat = 'Оборудование'
+
+	left join
+		pledge pl_goods
+			on
+				pl_goods.report_dt = rd.report_dt
+				and
+				pl_goods.agreement_rk = c.agreement_rk
+				and
+				pl_goods.pledge_cat = 'Товар'
+
+	left join
+		pledge pl_transport
+			on
+				pl_transport.report_dt = rd.report_dt
+				and
+				pl_transport.agreement_rk = c.agreement_rk
+				and
+				pl_transport.pledge_cat = 'Транспортные средства'
+
+	left join
+		pledge pl_others
+			on
+				pl_others.report_dt = rd.report_dt
+				and
+				pl_others.agreement_rk = c.agreement_rk
+				and
+				pl_others.pledge_cat = 'Прочее'
+
+	left join
+		guarantee gua
+			on
+				gua.report_dt = rd.report_dt
+				and
+				gua.agreement_rk = c.agreement_rk
+) with data
+primary index (agreement_rk, report_dt)
+;
+
+grant select on contract to bukhtiyarovama;
+grant select on customer_group to bukhtiyarovama;
+grant select on customer_group2 to bukhtiyarovama;
+grant select on issue_debt to bukhtiyarovama;
+
+
+drop table customer_group_whole_raw;
+create table customer_group_whole_raw as (
+select
+	gl.seg, gl.report_dt, gl.group_id,
+	--gh.customer_global_id,
+	--gh.customer_type_cd,
+	x.customer_mdm_rk as customer_global_id, -- по просьбе Кистанова А. mdm_rk назавано customer_global_id, т.к. много его запросов ссылается на него
+	c.agreement_rk
+from
+	( select
+			rd.report_dt,
+			gh.parent_row_id as group_id,
+			case
+				when c.product_id = 'ОК' or dev.agreement_rk is not null
+				then 'КОРП'
+				when c.product_id in ('КР','ОВ', 'ВЛ', 'МК', 'МБ', 'МЮ', 'ВЮ', 'ОЮ')
+				then 'ПРИОР'
+				when c.product_id in ('МН', 'ПМ', 'ПЭ', 'ПЯ', 'РЦ', 'РЛ', 'РЮ')
+				then 'СТАНД'
+				else '???'
+			end as seg
+		from
+			report_date rd
+		
+			join
+				contract c
+					on
+						c.issue_dt <= rd.report_dt
+						
+			join
+				dds.customer_connectd_debtors_hist gh
+					on
+						gh.customer_global_id = c.customer_global_id
+						and
+						gh.customer_type_cd = c.customer_type_cd
+						and
+						gh.effective_from_dttm <= rd.report_dt
+						and
+						gh.effective_to_dttm >= rd.report_dt
+						and
+						gh.deleted_flg = '0'
+						
+			left join
+				affiliate_group ag
+					on
+						ag.report_dt = rd.report_dt
+						and
+						ag.group_id = gh.parent_row_id
+						
+			left join
+				developer dev
+					on
+						dev.agreement_rk = c.agreement_rk
+		where
+			ag.group_id is null
+		qualify
+			row_number() over (
+				partition by rd.report_dt, gh.parent_row_id
+				order by case
+									when c.product_id = 'ОК' or dev.agreement_rk is not null then 3
+									when c.product_id in ('КР','ОВ', 'ВЛ', 'МК', 'МБ', 'МЮ', 'ВЮ', 'ОЮ') then 1
+									when c.product_id in ('МН', 'ПМ', 'ПЭ', 'ПЯ', 'РЦ', 'РЛ', 'РЮ') then 2
+									else 4 end ) = 1
+	) gl
+	
+	join
+		dds.customer_connectd_debtors_hist gh
+			on
+				gh.parent_row_id = gl.group_id
+				and
+				gh.effective_from_dttm <= gl.report_dt
+				and
+				gh.effective_to_dttm >= gl.report_dt
+				and
+				gh.deleted_flg = '0'
+/*
+	left join
+		portfolio p
+			on
+				p.customer_global_id = gh.customer_global_id
+				and
+				p.customer_type_cd = gh.customer_type_cd
+				and
+				p.report_dt = gl.report_dt
+*/
+	left join
+		contract c
+			on
+				c.customer_global_id = gh.customer_global_id
+				and
+				c.customer_type_cd = gh.customer_type_cd
+				and
+				c.issue_dt <= gl.report_dt
+
+	left join
+		cdm.tech_customer_mdm_x_grk x
+			on
+				gl.report_dt between x.effective_from_dttm and x.effective_to_dttm
+				and
+				x.deleted_flg = '0'
+				and
+				x.customer_global_rk = gh.customer_global_id
+				and
+				x.customer_type_cd = gh.customer_type_cd
+qualify
+	row_number() over (partition by gl.seg, gl.report_dt, gl.group_id, x.customer_mdm_rk, c.agreement_rk order by x.effective_from_dttm desc) = 1
+
+				) with data
+primary index (group_id, report_dt)
+;
+grant select on customer_group_whole_raw to kistanovai;
+GRANT SELECT ON customer_group_whole_raw TO shabaniniv;
