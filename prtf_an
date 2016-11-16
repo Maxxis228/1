@@ -7,6 +7,199 @@ FROM CDM.MREF_DELINQUENCY_RANGE dr
 WHERE dr.DELINQUENCY_RANGE_SET_CD = '140' AND dr.IS_ACTIVE_FLG = '1' AND dr.RANGE_ORDER_NUM < 7
 ) WITH DATA;
 
+DROP TABLE bis2cft;
+CREATE TABLE bis2cft AS (
+SELECT
+	ac.agreement_rk AS cft_agreement_rk,
+	ac.previous_agreement_rk AS bis_agreement_rk
+FROM
+	cdm.agreement_chain ac
+	JOIN
+		dds.contract_ln_cft_hist c
+			ON
+				c.agreement_rk = ac.agreement_rk
+				AND
+				c.contract_type_cd = 'LOAN'
+				AND
+				c.product_cd IN ('0403.27#1575368597', '0403.29#1575368617', '0403.30#1575368627')
+				AND
+				c.tranche_num = '1' AND c.root_agreement_rk = -1 AND c.cession_contract_num IS NULL 
+				AND
+				c.source_system_cd = '90974'
+				AND
+				CURRENT_DATE BETWEEN c.effective_from_dttm AND c.effective_to_dttm
+				AND
+				NOT (c.contract_amt = 0.0 AND c.contract_status_cd = 'CLOSE')
+				AND
+				COALESCE(c.contract_status_cd, 'WORK') NOT IN ('WAIT_CONF')
+WHERE
+	CURRENT_DATE BETWEEN ac.effective_from_dttm AND ac.effective_to_dttm
+	AND
+	ac.previous_source_system_cd <> '90974'
+	AND
+	ac.agreement_chain_type_cd = 'MIGRATIONS'
+	AND
+	ac.transformation_type_cd = 'MIGRATION'
+) WITH DATA
+PRIMARY INDEX (bis_agreement_rk);	
+
+DROP TABLE contract_cft;
+CREATE TABLE contract_cft AS (
+SELECT 
+	c.agreement_rk,
+	c.contract_type_cd agreement_type_cd,
+	TRUNC(c.issue_dt, 'mm') AS generation,
+	c.branch_cd AS branch_id,
+	c.contract_num AS contract_id,
+	--c.contract_id as contract_id_cft,
+	io.bis_internal_org_rk AS pos_dept_rk,
+	COALESCE(lim.loan_limit_amt, c.contract_amt) AS contract_amt,
+	c.currency_rk,
+	c.open_dt,
+	c.issue_dt,
+	CASE
+		WHEN c.contract_period IS NOT NULL AND c.time_interval_cd = 'D#2052561'
+		THEN c.contract_period
+		WHEN c.contract_period IS NOT NULL AND c.time_interval_cd = 'M#2052565'
+		THEN ADD_MONTHS(COALESCE(c.open_dt, c.issue_dt), c.contract_period) - COALESCE(c.open_dt, c.issue_dt) 
+		WHEN c.contract_period IS NULL AND close_plan_dt IS NOT NULL
+		THEN c.close_plan_dt - CASE WHEN open_dt >= DATE '2005-01-01' THEN open_dt ELSE c.issue_dt END
+	END AS term,
+	CASE WHEN c.close_dt < CURRENT_DATE THEN c.close_dt ELSE close_plan_dt END AS close_dt,
+	COALESCE(SUBSTR(c.product_sub_id,4,2),
+	CASE
+		WHEN c.product_cd IN ('0403.29#1575368617', '0403.30#1575368627') THEN 'МН'
+		WHEN c.product_cd IN ('0403.27#1575368597') THEN 'РЛ'
+	END) AS product_id,
+	CAST('' AS VARCHAR(1000)) AS qualifier_cd,
+	c.product_sub_id AS subproduct_id,
+	p.product_desc AS product_nm,
+	sp.product_nm AS subproduct_nm,
+	CAST('' AS VARCHAR(10)) AS purpose,
+	CASE
+		WHEN c.product_cd IN ('0403.29#1575368617', '0403.30#1575368627') THEN 'МН'
+		WHEN c.product_cd IN ('0403.27#1575368597') THEN 'РЛ'
+	END AS product,
+	'н/д' AS lvl,
+	c.customer_rk,
+	c.customer_type_cd,
+	ar.rate,
+	NULL AS customer_global_id,
+	cx.customer_rk AS customer_mdm_rk,
+	COALESCE(mdmcorp.organization_full_nm, '' || COALESCE(mdmind.last_nm || ' ', '') || COALESCE(mdmind.first_nm || ' ', '') || COALESCE(mdmind.middle_nm, '')) AS customer_nm,
+	COALESCE(mdmcorp.tax_payer_num, mdmind.tax_payer_num) AS customer_tin,
+	
+	CAST('' AS VARCHAR(300)) AS okved_code,
+	CAST('' AS VARCHAR(200)) AS okved_desc,
+	
+	b2c.bis_agreement_rk AS b2c_bis_agreement_rk
+FROM
+	dds.contract_ln_cft_hist c
+	
+	LEFT JOIN
+		dds.internal_org_cft_hist io
+			ON
+				io.internal_org_id = c.init_internal_org_id
+				AND
+				CURRENT_DATE BETWEEN io.effective_from_dttm AND io.effective_to_dttm
+				AND
+				io.deleted_flg = '0'
+	
+	LEFT JOIN
+		dds.contract_ln_limit_cft_hist lim
+			ON
+				lim.agreement_rk = c.agreement_rk
+				AND
+				CURRENT_DATE BETWEEN lim.effective_from_dttm AND lim.effective_to_dttm
+				AND
+				lim.deleted_flg = '0'
+				AND
+				lim.loan_limit_amt > 0
+	
+	LEFT JOIN
+		dds.product_ln_guarantee_cft_hist p
+			ON
+				p.product_cd = c.product_cd
+				AND
+				CURRENT_DATE BETWEEN p.effective_from_dttm AND p.effective_to_dttm
+				AND
+				p.deleted_flg = '0'
+				
+	LEFT JOIN
+		dds.agreement_rate_cft_hist ar
+			ON
+				ar.agreement_rk = c.agreement_rk
+				AND
+				CURRENT_DATE BETWEEN ar.effective_from_dttm AND ar.effective_to_dttm
+				AND
+				ar.deleted_flg = '0'
+				AND
+				ar.debt_type_cd IN ('НЕУЧТЕН_ПРОЦЕНТЫ')
+				
+	LEFT JOIN
+		dds.customer_registry_mdm_hist cx
+			ON
+				cx.local_customer_rk = c.customer_rk
+				AND
+				cx.local_source_system_cd = c.source_system_cd
+				AND
+				CURRENT_DATE BETWEEN cx.effective_from_dttm AND cx.effective_to_dttm
+				AND
+				cx.deleted_flg = '0'
+				
+	LEFT JOIN
+		dds.corporate_mdm_hist mdmcorp
+			ON
+				mdmcorp.customer_rk = cx.customer_rk
+				AND
+				mdmcorp.deleted_flg = '0'
+				AND
+				CURRENT_DATE BETWEEN mdmcorp.effective_from_dttm AND mdmcorp.effective_to_dttm
+				
+	LEFT JOIN
+		dds.individual_mdm_hist mdmind
+			ON
+				mdmind.customer_rk = cx.customer_rk
+				AND
+				mdmind.deleted_flg = '0'
+				AND
+				CURRENT_DATE BETWEEN mdmind.effective_from_dttm AND mdmind.effective_to_dttm
+				
+	LEFT JOIN
+		dds.product_sblfr_hist sp
+			ON
+				sp.ext_product_id = c.product_sub_id
+				AND
+				sp.product_type_desc = 'Субпродукт'
+				AND
+				CURRENT_DATE BETWEEN sp.effective_from_dttm AND sp.effective_to_dttm
+				AND
+				sp.deleted_flg = '0'
+				
+	LEFT JOIN
+		bis2cft b2c
+			ON
+				b2c.cft_agreement_rk = c.agreement_rk
+				
+WHERE
+	c.contract_type_cd = 'LOAN'
+	AND
+	c.product_cd IN ('0403.27#1575368597', '0403.29#1575368617', '0403.30#1575368627')
+	AND
+	c.tranche_num = '1' AND root_agreement_rk = -1 AND cession_contract_num IS NULL 
+	AND
+	c.source_system_cd = '90974'
+	AND
+	CURRENT_DATE BETWEEN c.effective_from_dttm AND c.effective_to_dttm
+	AND
+	NOT (c.contract_amt = 0.0 AND c.contract_status_cd = 'CLOSE')
+	AND
+	COALESCE(c.contract_status_cd, 'WORK') NOT IN ('WAIT_CONF')
+QUALIFY
+	ROW_NUMBER() OVER (PARTITION BY c.agreement_rk, c.product_sub_id ORDER BY lim.start_dt, ar.start_dt, CASE WHEN sp.ext_product_id = sp.sbl_product_id THEN 1 ELSE 2 END, sp.last_update_dttm DESC) = 1
+) WITH DATA
+PRIMARY INDEX (agreement_rk);
+
 --список всех существовавших договоров по нашим продуктам
 DROP TABLE _contract;
 CREATE  TABLE _contract AS (
