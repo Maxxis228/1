@@ -1,0 +1,163 @@
+DROP TABLE OKB_APP_WF_BKI_ALL_1; 
+CREATE TABLE OKB_APP_WF_BKI_ALL_1 AS (
+SELECT 
+APP.APPLICATION_RK, APP.ID_APPL, APP.INTERNAL_ORG_RK, APP.INTERNAL_ORG_ID, APP.INTERNAL_ORG_NM, APP.REGION_GEOGRAPHY_CD, APP.POS_ID, APP.POS_NM,
+APP.LOGIN_RK, APP.LOGIN_NM, APP.LOGIN_NUM, APP.WORKPLACE_DESC, APP.JOB_DESC, APP.APPLICATION_DT, APP.APPLICATION_MNTH,
+APP.BRANCH_ID, APP.APPLICATION_ID, APP.AGREEMENT_RK, APP.APPLIED_AMT_NC, APP.MONTHS_CNT, APP.APP_STATUS_ID, APP.APP_STATUS_ID_LAST,
+APP.CLOSE_DT, APP.CUSTOMER_ID, APP.CUSTOMER_RK, APP.CUSTOMER_TYPE_CD, APP.PRODUCT_OPERATIONAL_RK, APP.RedZone, BKI.PRODUCT_OPERATIONAL_ID, APP.SUBPRODUCT_CD,
+BKI.APP_ID, BKI.APP_RK, BKI.TRANS_DATE, BKI.TRANS_TIME, BKI.LOGICAL_STAGE, BKI.PERSON, BKI.CREDIT_LIMIT, BKI.STATUS, BKI.OPEN_DATE, BKI.CLOSE_DATE_LOAN, BKI.END_DATE, 
+BKI.PAYMENT_DELAYS_A, BKI.PAYMENT_DELAYS_B, BKI.PAYMENT_DELAYS_C, BKI.PAYMENT_DELAYS_D, BKI.SOURCE, BKI.ARREARS_VALUE, BKI.DAYS_IN_ARREARS, BKI.BKI_PRODUCT_TYPE_ID,
+BKI.MONTHLY_LIABILITY, BKI.GUARANTEE_FLAG, BKI.AMOUNT_OUTSTANDING, BKI.PAYMENT_DELAYS_A_180, BKI.PAYMENT_DELAYS_B_180, BKI.PAYMENT_DELAYS_C_180, BKI.PAYMENT_DELAYS_D_180,
+BKI.COVERAGE_REPAYMENT_FLG, BKI.ABSProdCode, BKI.COURT_INFORMATION_FLG, BKI.PLEDGE_SALE_FLG,
+-------------Корректная дата окончания кредита CH_END_DATE. Используется не ВЕЗДЕ!
+CASE WHEN  BKI.END_DATE='1900-01-01' OR BKI.END_DATE>=BKI.CLOSE_DATE_LOAN THEN BKI.CLOSE_DATE_LOAN ELSE BKI.END_DATE  END AS CH_END_DATE,
+    
+-----------Отбор договоров за 5 лет КИ BKICredit5Years=1
+CASE WHEN ( CAST(BKI.TRANS_DATE AS DATE) - CH_END_DATE ) <=1826 THEN 1  ELSE 0 END  BKICredit5Years,
+--отбираем договора фактическая дата закрытия по которым менее 5 лет. + Открытые договора (с датой закрытия 1900-01-01)
+
+------------Флаг действующего кредитного договора BKICreditOpen=1       
+CASE WHEN BKI.STATUS IN ('A', 'O') AND (BKI.CLOSE_DATE_LOAN>=BKI.TRANS_DATE OR BKI.ARREARS_VALUE>0 OR BKI.DAYS_IN_ARREARS>0) AND (BKI.END_DATE>=BKI.TRANS_DATE OR BKI.END_DATE='1900-01-01' OR BKI.ARREARS_VALUE>0 OR BKI.DAYS_IN_ARREARS>0) THEN 1 ELSE 0 END  BKICreditOpen,  
+------------Просрочки (все) за 5 лет
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_A,0) ELSE 0 END DELAY_LESS_29_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_B,0) ELSE 0 END DELAY_30_59_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_C,0) ELSE 0 END DELAY_60_89_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_D,0) ELSE 0 END DELAY_90_MORE_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_A_180,0) ELSE 0 END DELAY_LESS_29_180_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_B_180,0) ELSE 0 END DELAY_30_59_180_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_C_180,0) ELSE 0 END DELAY_60_89_180_CNT,
+CASE WHEN BKICredit5Years=1 THEN COALESCE(BKI.PAYMENT_DELAYS_D_180,0) ELSE 0 END DELAY_90_MORE_180_CNT,
+------------Просрочки (для открытых кредитов) за 5 лет
+--CASE WHEN BKICredit5Years=1 AND BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_A,0) ELSE 0 END DELAY_O_LESS_29_CNT,
+CASE WHEN BKICredit5Years=1 AND BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_B,0) ELSE 0 END DELAY_O_30_59_CNT,
+CASE WHEN BKICredit5Years=1 AND BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_C,0) ELSE 0 END DELAY_O_60_89_CNT,
+CASE WHEN BKICredit5Years=1 AND BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_D,0) ELSE 0 END DELAY_O_90_MORE_CNT,
+--------------- Текущая просроченная задолженность по обязательствам на бизнес-цели и и физ.лиц участников сделки
+CASE WHEN BKICredit5Years=1 AND BKI.SOURCE<>'4' AND (BKI.PERSON IN ('5','7') OR BKI.BKI_PRODUCT_TYPE_ID IN ('04','10','11','12','13','14','1000', '1001', '1002') OR BKI.ABSProdCode IN ('ПМ','ПЭ','ПЯ','МН','КР','МК','ОВ','ВЛ','ЛА','ЛП','ЛС')) THEN COALESCE(BKI.ARREARS_VALUE,0) ELSE 0 END ARREARS_BUS_VALUE,
+CASE WHEN BKICredit5Years=1 AND BKI.SOURCE<>'4' AND BKI.PERSON IN ('0','1','2','6') AND BKICreditOpen=1 THEN COALESCE(BKI.ARREARS_VALUE,0) ELSE 0 END ARREARS_PERS_VALUE,
+----------------Правило повторного клиента VTBRepeatClient=1 - повторный клиент
+CASE WHEN BKICreditOpen=1 AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=12 AND BKI.SOURCE='3' AND BKI.BKI_PRODUCT_TYPE_ID<>'07' THEN 1 
+WHEN BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<6 AND MONTHS_BETWEEN(CH_END_DATE, BKI.OPEN_DATE)>=12 AND BKI.SOURCE='3' AND BKI.BKI_PRODUCT_TYPE_ID<>'07' THEN 1 ELSE 0 END VTBRepeatClient,
+---------------Правило отбора договоров для Светофора SvetoforContract=1 -договор подходит для Светофора
+CASE WHEN BKICreditOpen=1 THEN 1 WHEN BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<12 THEN 1 ELSE 0 END SvetoforContract,
+---------------Отнесение продукта к реструктуризации для Светофора
+CASE WHEN BKI.ABSProdCode IN ('РР', 'РП', 'РК', 'РЗ', 'РН', 'РМ', 'РЛ', 'РЦ', 'РЮ')  THEN 1 ELSE 0 END RestructProd,
+----------------Светофор SvetoforFlag =1 - хороший клиент, не попавший под мин. требование
+CASE WHEN BKI.ABSProdCode IN ('ПМ', 'МН', 'ПЯ', 'ПЭ', 'ОН') AND RestructProd=0 AND BKI.COVERAGE_REPAYMENT_FLG<>'Y' AND 
+(COALESCE(BKI.PAYMENT_DELAYS_A, 0)+COALESCE(BKI.PAYMENT_DELAYS_B, 0)+COALESCE(BKI.PAYMENT_DELAYS_C, 0)+COALESCE(BKI.PAYMENT_DELAYS_D, 0)+ COALESCE(BKI.PAYMENT_DELAYS_A_180, 0)+ COALESCE(BKI.PAYMENT_DELAYS_B_180, 0)+ COALESCE(BKI.PAYMENT_DELAYS_C_180, 0)+ COALESCE(BKI.PAYMENT_DELAYS_D_180, 0)+ COALESCE(BKI.ARREARS_VALUE, 0)+COALESCE(BKI.DAYS_IN_ARREARS, 0))=0 
+AND ( (MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=23 AND MONTHS_BETWEEN(BKI.OPEN_DATE, CH_END_DATE)>24) OR (MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=11 AND MONTHS_BETWEEN(BKI.OPEN_DATE, CH_END_DATE)<=24) ) THEN 1 ELSE 0 END SvetoforFlag,
+----------------------Для мин.требования для Светофора. Если =1, значит не проходит мин.требование ----> отказ
+CASE WHEN APP.RedZone=0 THEN 0 WHEN APP.RedZone=1 AND SvetoforFlag=0 THEN 1 WHEN APP.RedZone=1 AND SvetoforFlag=1 AND SvetoforContract=1 THEN 0 
+WHEN APP.RedZone=1 AND SvetoforFlag=1 AND SvetoforContract=0 THEN 1 ELSE NULL END MR_Svetofor,
+-------------Для правила по наличию базового продукта в БКИ (для МН) 1 - ок, 0 - отказ. Толкто для SUBPRODUCT_CD IN ('10,МН,00031', '10,МН,00032') 
+CASE WHEN BKICreditOpen=1 AND ((BKI.ABSProdCode='ПМ' AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=24) OR (BKI.ABSProdCode='МН' AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=12)) THEN 1 WHEN BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<6 AND ((BKI.ABSProdCode='ПМ' AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=24) OR (BKI.ABSProdCode='МН' AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)>=12)) THEN 1 ELSE 0 END BasicProduct, -------------Наличие базового продукта
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------Дополнительные варианты расчета числа просрочек за 5 леет от 1 до 29 дней
+--CASE WHEN BKICredit5Years=1 AND BKI.BKI_PRODUCT_TYPE_ID<>'07'  THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_1,
+--CASE WHEN BKICredit5Years=1 AND BKI.SOURCE=3 THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_2,
+--CASE WHEN BKICredit5Years=1 AND BKI.SOURCE=3 AND BKI.BKI_PRODUCT_TYPE_ID<>'07' THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_3,
+CASE WHEN BKICredit5Years=1 AND  BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_A, 0) ELSE 0 END DELAY_LESS_29_CNT_4,
+CASE WHEN BKICredit5Years=1 AND  BKICreditOpen=1 THEN COALESCE(BKI.PAYMENT_DELAYS_A_180, 0) ELSE 0 END DELAY_LESS_29_180_CNT_4,
+--CASE WHEN BKICredit5Years=1 AND  (BKICreditOpen=1 OR (BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<24 )) THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_5,
+--CASE WHEN BKICredit5Years=1 AND  (BKICreditOpen=1 OR (BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<24 )) AND BKI.BKI_PRODUCT_TYPE_ID<>'07'  THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_6,
+--CASE WHEN BKICredit5Years=1 AND  (BKICreditOpen=1 OR (BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<24 )) AND BKI.BKI_PRODUCT_TYPE_ID<>'07' AND BKI.SOURCE=3 THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_7,
+--CASE WHEN BKICredit5Years=1 AND BKI.CREDIT_LIMIT >100000 AND BKI.BKI_PRODUCT_TYPE_ID<>'07'  THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_8,
+--CASE WHEN BKICredit5Years=1 AND BKI.CREDIT_LIMIT >100000 AND BKI.BKI_PRODUCT_TYPE_ID<>'07'  AND   (BKICreditOpen=1 OR (BKICreditOpen=0 AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<24 )) THEN BKI.PAYMENT_DELAYS_A ELSE 0 END DELAY_LESS_29_CNT_9
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------Доп.вычисления для других задач
+----Определяем карты с лимитом менее 100000 р.
+--CASE WHEN BKI_PRODUCT_TYPE_ID='07'  AND CREDIT_LIMIT<=50000 THEN 1 ELSE 0 END CardMinLim_Flg,
+
+--Возраст (в месяцах) открытого кредита
+CASE WHEN BKICredit5Years=1 THEN MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE) ELSE NULL END OpenCredit,
+--кол-во открытых кредитов ВТБ втечение последних 3 месяцев
+CASE WHEN BKI.CREDIT_LIMIT>=100000 AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)<=3 AND BKICreditOpen=1 AND BKI.SOURCE='3' THEN 1 ELSE 0 END Credit_VTB_3M,
+--кол-во открытых кредитов (за исключением ВТБ) втечение последних 3 месяцев
+ CASE WHEN BKI.CREDIT_LIMIT>=100000 AND MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)<=3 AND BKICreditOpen=1 AND BKI.SOURCE<>'3' THEN 1 ELSE 0 END Credit_Other_3M,
+--Флаг октрытого кредита (или закрытого в течение последних 3 месяцев)  линейки Коммерсант
+CASE WHEN (BKI.SOURCE='3' AND BKICreditOpen=0 AND BKI.ABSProdCode IN ('ПМ', 'МН', 'ПЯ', 'ПЭ', 'ОН') AND MONTHS_BETWEEN(BKI.TRANS_DATE, CH_END_DATE)<=3) OR (BKI.SOURCE='3' AND BKICreditOpen=1 AND BKI.ABSProdCode IN ('ПМ', 'МН', 'ПЯ', 'ПЭ', 'ОН')) THEN 1 ELSE 0 END Credit_Kommers_Flg,
+　
+CASE WHEN (BKI.SOURCE='3' AND BKICreditOpen=1 AND BKI.ABSProdCode IN ('ПМ', 'МН', 'ПЯ', 'ПЭ', 'ОН')) THEN BKI.AMOUNT_OUTSTANDING ELSE 0 END KS_AMOUNT_OUTSTANDING, 
+CASE WHEN (BKI.SOURCE='3' AND BKICreditOpen=1 AND BKI.ABSProdCode IN ('ПМ', 'МН', 'ПЯ', 'ПЭ', 'ОН')) THEN BKI.CREDIT_LIMIT ELSE 0 END KS_CREDIT_LIMIT,
+-----Для РКО
+--// считаем кредиты на бизнес цели открытые за последние 6 месяцев
+CASE WHEN MONTHS_BETWEEN(BKI.TRANS_DATE, BKI.OPEN_DATE)<6 AND BKI.ABSProdCode IN ('МН', 'РМ', 'РЛ', 'КР', 'ВЛ', 'ОВ') THEN 1 ELSE 0 END CreditInHistory6m_Flg,
+    
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------Для скор.карты ФЛ
+
+CASE WHEN BKI.PERSON= '0' AND BKI.SOURCE NOT IN ( '4','3') AND BKI.STATUS NOT IN ('A', 'R') AND (BKI.TRANS_DATE- CH_END_DATE)<=1826 THEN 1 ELSE 0 END BKIScore_Flg,
+　
+CASE WHEN BKI.PERSON IN( '0', '5') AND BKI.SOURCE='3' AND BKI.STATUS NOT IN ('A', 'R') AND (BKI.TRANS_DATE- CH_END_DATE)<=1826 THEN 1 ELSE 0 END VTBScore_Flg,
+　
+--// определение статуса (если кредит пришел со статусом "О", но EndDate уже наступило и нет просрочек - считаем договор закрытым)
+CASE WHEN BKI.STATUS='C' OR ( BKI.STATUS='O' AND COALESCE(BKI.ARREARS_VALUE,0)=0 AND COALESCE(BKI.DAYS_IN_ARREARS, 0)=0 AND CH_END_DATE<BKI.TRANS_DATE) THEN 'C' ELSE  'O' END BKIBureauStatus,
+　
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------Для лимитов--------------------------------------------------------------------
+--------------------------------------------------------------------Определяем общий и оставшийся срок обязтельств
+CASE WHEN BKI.END_DATE='1900-01-01'  OR BKI.END_DATE>=BKI.CLOSE_DATE_LOAN THEN  CAST((BKI.CLOSE_DATE_LOAN-BKI.OPEN_DATE)/30.00 AS DECIMAL (18,2)) ELSE CAST( (BKI.END_DATE-BKI.OPEN_DATE)/30.00 AS DECIMAL (18,2)) END BKITermInMonth_1, --общий
+    
+CASE WHEN BKI.END_DATE='1900-01-01'  OR BKI.END_DATE>=BKI.CLOSE_DATE_LOAN THEN CAST( (BKI.CLOSE_DATE_LOAN-BKI.TRANS_DATE)/30.00 AS DECIMAL (18,2)) ELSE CAST( (BKI.END_DATE-BKI.TRANS_DATE)/30.00 AS DECIMAL (18,2)) END BKIRemainTermInMonth_1, --оставшийся
+    --для исключения деления на 0 в случае совпадения текущей даты с датой закрытия
+CASE WHEN  BKIRemainTermInMonth_1=0 THEN CAST(1.00/30.00 AS DECIMAL (18,6)) ELSE BKIRemainTermInMonth_1 END BKIRemainTermInMonth_2,
+    --для отсечения ошибок в анкетных данных
+CASE WHEN BKI.SOURCE='4' AND BKI.OPEN_DATE>BKI.TRANS_DATE THEN BKIRemainTermInMonth_2 ELSE BKITermInMonth_1 END BKITermInMonth_2,
+    
+CASE WHEN BKITermInMonth_2<1.00 AND  BKI.SOURCE='4' AND BKI.OPEN_DATE>BKI.TRANS_DATE THEN 1.00 ELSE BKITermInMonth_2 END BKITermInMonth,
+    
+CASE WHEN BKITermInMonth_2<1.00 AND  BKI.SOURCE='4' AND BKI.OPEN_DATE>BKI.TRANS_DATE THEN 1.00 ELSE BKIRemainTermInMonth_2 END BKIRemainTermInMonth,
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+    ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    ----------------------!!!!!!Смотрим только открытые 
+    ----------------------------------------------------------------------------------------Совокупная величина ежемесячного платежа
+    --Флаг определения карточного продукта
+CASE WHEN  BKI.ABSProdCode<>'КР' AND SUBSTR(BKI.ABSProdCode, 1, 1)='К' THEN 1 ELSE 0 END Card_Flg,
+    
+--------------------------------------------------------------------Расчет обязательств--------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+CASE 
+    WHEN BKICreditOpen=1 AND BKI.MONTHLY_LIABILITY>0 THEN BKI.MONTHLY_LIABILITY
+    WHEN BKICreditOpen=1 AND BKI.MONTHLY_LIABILITY<=0 AND BKI.GUARANTEE_FLAG <>'Y' THEN (BKI.CREDIT_LIMIT/BKITermInMonth)+0.014*BKI.CREDIT_LIMIT
+    WHEN BKICreditOpen=1 AND BKI.MONTHLY_LIABILITY<=0 AND BKI.GUARANTEE_FLAG ='Y' THEN 0.5*((BKI.CREDIT_LIMIT/BKITermInMonth)+0.014*BKI.CREDIT_LIMIT)
+    ELSE 0 END BKIMonthlyLiability_1,   
+    ---Поправка на карты 
+CASE 
+    WHEN BKICreditOpen=1 AND Card_Flg=1 AND BKI.MONTHLY_LIABILITY<=0 THEN 0 ELSE BKIMonthlyLiability_1 END BKIMonthlyLiability,
+    ---Доп.поле
+CASE 
+    WHEN (0.014 +1.00 /CAST(BKIRemainTermInMonth AS DECIMAL(18,6)))=0 THEN 0
+    WHEN BKICreditOpen=1 AND Card_Flg=1 THEN BKI.CREDIT_LIMIT
+    WHEN BKICreditOpen=1 AND Card_Flg=0 THEN  CAST(BKIMonthlyLiability AS DECIMAL (18,6))/(0.014 +1.00 /CAST(BKIRemainTermInMonth AS DECIMAL(18,6)))            
+    ELSE 0 END BKIOutstanding,
+    
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------Обязательства ЮР лиц --------------------------------------------------------------------
+    --Флаг определения Юр.лица
+    CASE WHEN     BKI.PERSON IN ('5', '7') OR BKI.BKI_PRODUCT_TYPE_ID IN ('04','10','11','12','13','14','16', '1000', '1001', '1002') OR BKI.ABSProdCode IN ('ПМ','ПЭ','ПЯ','МН','КР','МК','ОВ','ВЛ','ЛА','ЛП','ЛС') THEN 1 ELSE 0 END UrL_Flg,
+    --Общие обязательства
+    CASE WHEN UrL_Flg=1 AND BKICreditOpen=1 THEN BKIMonthlyLiability ELSE 0 END BKISumOfMonthlyLiability,
+    
+    CASE WHEN UrL_Flg=1 AND BKICreditOpen=1 AND BKI.GUARANTEE_FLAG ='N' THEN BKIMonthlyLiability ELSE 0 END BKISumOfMonthlyLiabilNG,
+    
+    --Расчет совокупной величины обязательств по ГСЗ перед ВТБ24
+    
+    CASE WHEN UrL_Flg=1 AND BKICreditOpen=1 AND BKI.SOURCE=3 THEN BKIOutstanding ELSE 0 END BKISumOfCPGLiability,
+    
+    CASE WHEN UrL_Flg=1 AND BKICreditOpen=1 AND BKI.GUARANTEE_FLAG ='N' AND BKI.SOURCE=3 THEN BKIOutstanding ELSE 0 END BKISumOfCPGLiabilNG,
+    --------------------------------------------------------------------Обязательства ФИЗ лиц (за все время --------------------------------------------------------------------
+    CASE WHEN UrL_Flg=0 AND BKICreditOpen=1 THEN BKIMonthlyLiability ELSE 0 END BKIPersonSumOfMonthlyLiability,
+    
+    CASE WHEN UrL_Flg=0 AND BKICreditOpen=1 AND BKI.GUARANTEE_FLAG ='N' THEN BKIMonthlyLiability ELSE 0 END BKIPersonSumOfMonthlyLiabilNG,
+    --Расчет совокупной величины обязательств по ГСЗ перед ВТБ24
+    
+    CASE WHEN UrL_Flg=0 AND BKICreditOpen=1 AND BKI.SOURCE=3 THEN BKIOutstanding ELSE 0 END BKIPersonSumOfCPGLiability,      
+    
+    CASE WHEN UrL_Flg=0 AND BKICreditOpen=1 AND BKI.GUARANTEE_FLAG ='N' AND BKI.SOURCE=3 THEN BKIOutstanding ELSE 0 END BKIPersonSumOfCPGLiabilNG            
+    
+FROM OKB_APP_POPUL_WHZONE APP
+LEFT JOIN ANDRIEVSKIYAA.APP_BKI BKI 
+ON BKI.APPLICATION_RK=APP.APPLICATION_RK
+) WITH DATA PRIMARY INDEX (APPLICATION_RK);
